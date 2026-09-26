@@ -5,6 +5,7 @@
 #include "WindowTracker.h"
 #include "EdgeHotZone.h"
 #include "AppBarReserve.h"
+#include "PreviewWin.h"
 #include <vector>
 #include <string>
 #include <filesystem>
@@ -65,6 +66,9 @@ namespace zdock {
 		static constexpr int   kTimerAutoHide = 2;  // 自动隐藏延迟 / 滑动补间（阶段四）
 		static constexpr int   kTimerSlide = 3;     // 滑动动画补间（阶段四）
 		static constexpr int   kTimerRelayout = 4;  // 显示环境变化后的重排（延迟一拍，见下）
+		static constexpr int   kTimerPreview = 5;   // 悬停预览的 300ms 延迟（阶段五）
+		/// 悬停多久之后弹预览（任务书 §2 #17：约 300ms）
+		static constexpr int   kPreviewDelayMs = 300;
 		static constexpr int   kMenuExit = 101;
 		static constexpr int   kMenuOpen = 102;
 		static constexpr int   kMenuOpenAdmin = 103;
@@ -259,6 +263,39 @@ namespace zdock {
 		/// <summary>explorer 重启（TaskbarCreated 广播）后的自愈：重注册 AppBar + 跟踪器。</summary>
 		void onTaskbarCreated();
 
+		// ---- 拖放（阶段五）----
+
+		/// <summary>
+		/// 窗口过程的**子类化**回调（阶段五）。
+		///
+		/// ⚠ 为什么需要子类化：Ling 的 `WinBase` 只暴露少量可覆写点和一组 winrt 事件，
+		///   **没有通用消息钩子**，也不处理 `WM_DROPFILES`。而拖放是"消息进窗口过程"
+		///   才能拿到的东西。三条路里子类化是唯一不动 Ling、也不和 dock 自己的
+		///   命中测试打架的做法（另两条：改 Ling 加钩子 / 用覆盖窗口收拖放 ——
+		///   后者会挡住 dock 的 hover）。
+		///
+		/// 实测（`build-support/_probe_subclass.cpp`）：子类化后能收到投给该窗口的消息、
+		///   Ling 存在 `GWLP_USERDATA` 里的 self 指针不受影响、原 wndProc 转发链正常。
+		/// </summary>
+		static LRESULT CALLBACK subclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+
+		/// <summary>处理 WM_DROPFILES：把拖进来的文件用落点那个图标对应的程序打开。</summary>
+		void onDropFiles(HDROP drop);
+
+		/// <summary>路径是不是目录（决定"用程序打开"还是"复制进去"）。</summary>
+		static bool isDirectoryPath(const std::wstring& path);
+
+		// ---- 悬停预览（阶段五）----
+
+		/// <summary>
+		/// 悬停满 kPreviewDelayMs 后弹预览：取该图标对应应用的窗口，
+		/// 用 DWM 缩略图显示实时画面（任务书 §2 #17）。
+		/// </summary>
+		void showPreviewForHover();
+
+		/// <summary>取消待弹出的预览 + 收起已显示的预览（鼠标离开图标时调）。</summary>
+		void cancelPreview();
+
 		float px(float logical) const { return logical * dpi; }
 		float panelW() const;
 		float panelH() const;
@@ -303,6 +340,11 @@ namespace zdock {
 		EdgeHotZone hotZone;
 		AppBarReserve appBar;
 
+		/// 悬停预览气泡（独立顶层窗口，DWM 缩略图做画面 —— 见 PreviewWin.h）
+		PreviewWin preview;
+		/// 300ms 预览延迟的定时器是否挂着
+		bool previewTimerOn{ false };
+
 		/// 当前是否有全屏应用在前台。来源 = WindowTracker 的 onFullscreenChanged
 		/// （自动化测试也会通过热区的注入通道喂它，见 EdgeHotZone::onTestInject）。
 		/// ⚠ 用它而不是直接问 tracker：tracker 的状态更新有自己的时机，
@@ -313,6 +355,14 @@ namespace zdock {
 		/// 菜单 / 拖放会话计数（>0 时绝不隐藏）。
 		/// 菜单是模态的，弹之前 +1、弹完 −1。
 		int menuSessions{ 0 };
+
+		/// 子类化前的原窗口过程（Ling 的）。子类化回调里要 CallWindowProc 转回去。
+		WNDPROC origWndProc{ nullptr };
+
+		/// 子类化回调里取 this 用。⚠ 不能读 GWLP_USERDATA —— 那里存的是 **Ling 自己的**
+		/// `WinBase*`（`build-support/_probe_subclass.cpp` 实测确认），
+		/// 拿它向下转型虽然当下能用，但那是依赖 Ling 的内部布局。
+		static DockWin* s_self;
 	};
 
 } // namespace zdock

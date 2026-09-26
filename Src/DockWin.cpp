@@ -13,6 +13,10 @@
 
 namespace zdock {
 
+	// 子类化回调里取 this 用（单实例程序，静态指针够用）。
+	// ⚠ 不读 GWLP_USERDATA —— 那里是 Ling 自己的 WinBase*。
+	DockWin* DockWin::s_self = nullptr;
+
 	DockWin::DockWin() = default;
 
 	DockWin::~DockWin()
@@ -20,6 +24,8 @@ namespace zdock {
 		// ⚠ 跟踪器的钩子必须在窗口销毁**之前**摘掉：它的回调会用到本对象，
 		//   对象没了还留着钩子就是悬空指针。
 		tracker.stop();
+		// 悬停预览：注销 DWM 缩略图（那是系统持有的句柄，不主动注销会一直挂着）
+		preview.hidePreview();
 		// 热区窗口是独立顶层窗口，也得显式销毁（它不属于 Ling 的窗口体系）
 		hotZone.destroy();
 		// AppBar 注销：不注销的话工作区会一直缩着，用户得重启 explorer 才好。
@@ -144,6 +150,13 @@ namespace zdock {
 				relayoutForEnvironment();
 				return;
 			}
+			if (id == kTimerPreview) {
+				// 悬停满 300ms → 弹预览（任务书 §2 #17）
+				killTimer(kTimerPreview);
+				previewTimerOn = false;
+				showPreviewForHover();
+				return;
+			}
 			if (id != kTimerHover) return;
 			if (hoverIndex < 0) {
 				ensureHoverTimer(false);
@@ -202,6 +215,24 @@ namespace zdock {
 		// 窗口没了就退进程：否则 DestroyWindow 之后消息循环还在空转，留一个
 		// "没窗口没托盘"的僵尸进程（ZPin 那边踩过同款）
 		onDestroy.add([] { Ling::App::get()->quit(0); });
+
+		// ---- 拖放（阶段五）----
+		// ⚠ 必须子类化：Ling 的 WinBase 没有通用消息钩子，`WM_DROPFILES` 走不到我们手里。
+		//   实测（_probe_subclass.cpp）：子类化后能收消息、Ling 的 self 指针不受影响、
+		//   原 wndProc 转发链正常。挂在自己的 hwnd 上，不碰任何别的窗口。
+		s_self = this;
+		origWndProc = reinterpret_cast<WNDPROC>(
+			SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&DockWin::subclassProc)));
+		if (!origWndProc) {
+			log(std::format(L"[drop] 子类化失败 err={} —— 拖放不可用", GetLastError()));
+		}
+		else {
+			DragAcceptFiles(hwnd, TRUE);
+			log(L"[drop] 已注册拖放受体（子类化 + DragAcceptFiles）");
+		}
+
+		// 悬停预览气泡（阶段五）：窗口**按需**创建 —— 没人悬停就别建。
+		preview.onLog = [](const std::wstring& s) { log(s); };
 
 		layout();   // 立刻布一次局，别等第一次 WM_PAINT
 		updateHitRegion();   // 初始命中区域 = 面板本体（halo 完全不参与命中）
@@ -362,7 +393,68 @@ namespace zdock {
 		applyHover(idx);
 		// 鼠标确实在图标上 → 确保兜底定时器开着；移开了 → 交给调用方关
 		if (idx >= 0) ensureHoverTimer(true);
+
+		// 阶段五：悬停预览。进入图标 → 起 300ms 计时；离开图标 → 立刻收。
+		// ⚠ 用"一次性定时器"实现延迟，不是轮询（任务书红线 4 的例外条款允许
+		//   "自身 UI 状态"的短定时器）。
+		if (idx >= 0) {
+			if (!previewTimerOn) {
+				setTimer(kPreviewDelayMs, kTimerPreview);
+				previewTimerOn = true;
+			}
+		}
+		else {
+			cancelPreview();
+		}
 		return true;
+	}
+
+	// ---------------------------------------------------------------------------
+	// 悬停预览（任务书 §2 #17）
+	// ---------------------------------------------------------------------------
+	void DockWin::cancelPreview()
+	{
+		if (previewTimerOn) {
+			killTimer(kTimerPreview);
+			previewTimerOn = false;
+		}
+		preview.hidePreview();
+	}
+
+	void DockWin::showPreviewForHover()
+	{
+		if (hoverIndex < 0 || hoverIndex >= static_cast<int>(items.size())) return;
+		const AppGroup* g = groupOfItem(hoverIndex);
+		if (!g || g->windows.empty()) {
+			// 没在跑的图标没有可预览的窗口（悬停只放大图标就够了）
+			return;
+		}
+
+		// 目标窗口：优先挑"可见且没最小化"的 —— DWM 缩略图对最小化窗口只能拿到
+		// 一张空画面，挑不出来就退回第一个（预览会显示成纯黑，至少位置/标题是对的）。
+		HWND target = nullptr;
+		for (HWND w : g->windows) {
+			if (IsWindow(w) && IsWindowVisible(w) && !IsIconic(w)) { target = w; break; }
+		}
+		if (!target) target = g->windows.front();
+
+		// 锚点 = 该图标**放大后**可见框的顶边中点（node 的坐标是物理像素、绝对，
+		// 正好是我们要的），再从客户区转到屏幕。
+		POINT anchor{};
+		const auto& it = items[hoverIndex];
+		if (it.node) {
+			anchor.x = static_cast<LONG>(it.node->x + it.node->w * 0.5f);
+			anchor.y = static_cast<LONG>(it.node->y);
+		}
+		else {
+			const float d = (dpi > 0.f) ? dpi : 1.f;
+			anchor.x = static_cast<LONG>((kSideSlack + kPadX
+				+ hoverIndex * (cfgIconBase + cfgIconGap) + cfgIconBase * 0.5f) * d);
+			anchor.y = static_cast<LONG>((kHaloH + kPadY) * d);
+		}
+		ClientToScreen(hwnd, &anchor);
+
+		preview.showFor(target, g->displayName, anchor);
 	}
 
 	void DockWin::applyHover(int index)
@@ -520,7 +612,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.4 · 自动隐藏 / 工作区预留");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.5 · 悬停预览 / 拖放");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1655,6 +1747,132 @@ namespace zdock {
 
 		syncWithTracker();
 		log(L"[dock] 自愈完成");
+	}
+
+	// ===========================================================================
+	// 阶段五：拖文件到图标上打开（任务书 §2 #20）
+	// ===========================================================================
+
+	LRESULT CALLBACK DockWin::subclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+	{
+		DockWin* self = s_self;
+		if (self && msg == WM_DROPFILES) {
+			self->onDropFiles(reinterpret_cast<HDROP>(wp));
+			return 0;
+		}
+		// ⚠ 其余消息**必须**原样转回 Ling 的窗口过程 —— 不转的话 dock 会
+		//   整个失去输入与绘制处理（子类化是"包一层"，不是"换一个"）。
+		if (self && self->origWndProc) {
+			return CallWindowProcW(self->origWndProc, hwnd, msg, wp, lp);
+		}
+		return DefWindowProcW(hwnd, msg, wp, lp);
+	}
+
+	bool DockWin::isDirectoryPath(const std::wstring& path)
+	{
+		const DWORD a = GetFileAttributesW(path.c_str());
+		return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+	}
+
+	void DockWin::onDropFiles(HDROP drop)
+	{
+		if (!drop) return;
+
+		// 落点（客户区坐标）→ 命中哪个图标。
+		// ⚠ 用 indexAtVisual 而不是 indexAtHover：用户是"看着图标"拖过去的，
+		//   放大后的那块可见框才是他以为的目标。
+		POINT pt{};
+		DragQueryPoint(drop, &pt);
+		const int idx = indexAtVisual(pt);
+
+		// 收集拖进来的文件。目录先跳过 —— 本阶段只做"文件"（拖文件夹进来
+		// 语义不明确：是复制整个目录树？还是只当成一个路径参数？先不做，
+		// 但记一行日志说明为什么没反应）。
+		const UINT total = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+		std::vector<std::wstring> files;
+		for (UINT i = 0; i < total; ++i) {
+			const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+			if (!len) continue;
+			std::wstring buf(len + 1, L'\0');
+			DragQueryFileW(drop, i, buf.data(), len + 1);
+			buf.resize(len);
+			if (isDirectoryPath(buf)) {
+				log(std::format(L"[drop] 跳过目录（只支持文件）：{}", buf));
+				continue;
+			}
+			files.push_back(std::move(buf));
+		}
+
+		if (idx < 0) {
+			log(std::format(L"[drop] 落点不在图标上（client={},{}）→ 忽略（共 {} 项）",
+				pt.x, pt.y, files.size()));
+			DragFinish(drop);
+			return;
+		}
+
+		const std::wstring target = items[idx].path;
+		if (files.empty()) {
+			log(std::format(L"[drop] 拖到「{}」但没有可用的文件", target));
+			DragFinish(drop);
+			return;
+		}
+
+		if (isDirectoryPath(target)) {
+			// ---- 拖到文件夹图标 → 复制进去（任务书 #20）----
+			// ⚠ pFrom / pTo 都是**双 \0 结尾**的多字符串，不是普通字符串。
+			std::wstring from;
+			for (const auto& f : files) {
+				from += f;
+				from.push_back(L'\0');
+			}
+			from.push_back(L'\0');
+			std::wstring to = target;
+			to.push_back(L'\0');
+			to.push_back(L'\0');
+
+			SHFILEOPSTRUCTW op{};
+			op.hwnd = hwnd;
+			op.wFunc = FO_COPY;
+			op.pFrom = from.c_str();
+			op.pTo = to.c_str();
+			// FOF_ALLOWUNDO：能撤销（进回收站语义）；不弹"是否创建目录"确认框
+			op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
+			const int rc = SHFileOperationW(&op);
+			if (rc == 0 && !op.fAnyOperationsAborted) {
+				log(std::format(L"[drop] 已复制 {} 个文件到「{}」", files.size(), target));
+			}
+			else {
+				log(std::format(L"[drop] 复制到「{}」失败 rc={} aborted={}",
+					target, rc, op.fAnyOperationsAborted ? 1 : 0));
+			}
+		}
+		else {
+			// ---- 拖到程序图标 → 用该程序打开 ----
+			// 多文件时把它们组成一个引号包裹、空格分隔的参数串。
+			// （带空格的路径必须加引号，否则会被拆成多个参数。）
+			std::wstring args;
+			for (size_t i = 0; i < files.size(); ++i) {
+				if (i) args += L' ';
+				args += L'"';
+				args += files[i];
+				args += L'"';
+			}
+			const std::filesystem::path tp{ target };
+			const std::wstring workDir = tp.parent_path().wstring();
+			const HINSTANCE r = ShellExecuteW(nullptr, L"open", target.c_str(),
+				args.c_str(), workDir.empty() ? nullptr : workDir.c_str(), SW_SHOWNORMAL);
+			if (reinterpret_cast<INT_PTR>(r) > 32) {
+				log(std::format(L"[drop] 已用「{}」打开 {} 个文件", target, files.size()));
+			}
+			else {
+				log(std::format(L"[drop] 用「{}」打开失败 code={}",
+					target, static_cast<long long>(reinterpret_cast<INT_PTR>(r))));
+			}
+		}
+
+		DragFinish(drop);
+		// 拖放刚结束，鼠标多半还在 dock 上 —— 别立刻把它收走
+		keepVisible();
 	}
 
 	LRESULT DockWin::onHitTest(const POINT pos)

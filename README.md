@@ -2,9 +2,10 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段四（AppBar 预留 / 自动隐藏 / 全屏让位）已完成并发布 `v0.1.4`**
-（依赖 **Ling v1.3.1**；阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、
-显示环境 26 项探针全 PASS；过程中挖出的 5 个 bug 已根因级修复，见 `CHANGELOG.md`）。
+当前进度：**阶段五（悬停预览 / 拖文件打开）已完成（v0.1.5）**
+（v0.1.4 已发布 GitHub Release；依赖 **Ling v1.3.1**。
+阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
+拖放 14 项、预览 13 项探针全 PASS；过程中挖出的 5 个 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -45,6 +46,10 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 - **显示环境变化自适应**：换显示器 / 改分辨率 / 改缩放比之后自动重排（尺寸 + 位置 +
   热区 + AppBar 一起走）。两条来源：`WM_DISPLAYCHANGE` / `WM_SETTINGCHANGE`
   （借跟踪器的隐藏顶层窗口收广播）+ Ling 的 `onDpiChanged`。
+- **悬停预览**（`Src/PreviewWin.*`）：鼠标停在图标上约 **300ms** 弹出预览气泡，
+  显示该应用窗口的**实时画面**（DWM 缩略图，零截图成本、不用定时刷新）；移开即收起。
+- **拖文件打开**：拖文件到程序图标上松手 → 用该程序打开；到文件夹图标 → 复制进去。
+  实现靠**子类化 dock 窗口**拿 `WM_DROPFILES`（Ling 不暴露消息口）。
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
 - 单实例：**自己命名的 mutex**（`Src/SingleInstance.*`）——
@@ -98,6 +103,34 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 | 正常退出 | 工作区底回到 1440，`zdock-appbar.state` 被删 |
 | explorer 重启 | 广播 `TaskbarCreated` → `收到 TaskbarCreated 广播` + `自愈完成`，热区仍在、进程存活 |
 | 可重复性 | 探针连跑两轮均 48/48，环境自检 `干净工作区上注册 1px AppBar 只吃掉 0px` |
+
+### 阶段五（v0.1.5，`_probe_drop.py` **14/14** + `_probe_preview.py` **13/13**）
+
+| 覆盖 | 结果 |
+|---|---|
+| 拖 2 个文件到文件夹图标 | 两个文件**真的出现在**目标文件夹 + 日志 `已复制 2 个文件` |
+| 拖到程序图标 | 走到"用该程序打开"分支（用不存在的 exe，零副作用证明分支被走到） |
+| 拖到非图标区 | 日志 `落点不在图标上 → 忽略`，且没有误复制 |
+| 拖目录进来 | 日志 `跳过目录`，目标文件夹里没出现它 |
+| 悬停前 | **没有**预览窗口（按需创建） |
+| 悬停 300ms 后 | 弹出预览；日志 `显示预览：目标=0x… 标题=「Python」` |
+| 预览位置 | 贴在**图标顶边**上方、水平对齐图标 |
+| **预览画面** | 预览窗口里数到 **46128 个品红像素** → DWM 缩略图确实合成进来了 |
+| 移开鼠标 | 预览收起 |
+
+### 最贵假设的先验（两个最小 demo）
+
+`_probe_dwm_thumb.cpp` / `_probe_dwm_thumb_ling.cpp` —— DWM 缩略图宿主可行性：
+
+| 宿主形态 | `DwmRegisterThumbnail` | 画面是否合成进来 |
+|---|---|---|
+| 普通窗口 | S_OK | **是**（品红像素 19200/19200） |
+| `WS_EX_NOREDIRECTIONBITMAP` | S_OK | **是** |
+| `WS_EX_LAYERED` | S_OK | **是** |
+| **真 Ling 窗口** | S_OK | **是** |
+
+`_probe_subclass.cpp` —— 子类化 Ling 窗口：能收消息、`GWLP_USERDATA` 不被破坏、
+转发链正常、可还原。`_probe_ling_appid.sh` —— 运行期读 Ling 的 appID 验证升级。
 
 截图见 `build/_review/`：`zdock_idle.png` / `zdock_hover.png`（阶段一）、
 `stage2_default.png` / `stage2_hover.png` / `stage2_menu.png` / `stage2_menu_global.png`（阶段二）、
@@ -194,7 +227,13 @@ bash build-support/build.sh
 <python> build-support/_probe_stage3.py              # 阶段三：跟踪/指示器/临时图标（13 项）
 <python> build-support/_probe_stage4.py              # 阶段四：自动隐藏/全屏让位/AppBar/自愈（48 项）
 <python> build-support/_probe_display_change.py       # 显示器/DPI 变化自适应 + 野指针健壮性（26 项）
+<python> build-support/_probe_drop.py                 # 拖文件到图标（14 项）
+<python> build-support/_probe_preview.py              # 悬停预览 / DWM 缩略图（13 项）
 <python> build-support/_probe_ling_appid.sh           # 编出读 Ling::App::appID 的小工具（升级验证）
+<python> build-support/_probe_ling_build.sh <名>      # 编一个"Ling 窗口"探针（如 _probe_subclass）
+bash build-support/_probe_dwm_thumb.sh                # DWM 缩略图宿主可行性（纯 Win32）
+bash build-support/_probe_dwm_thumb_ling.sh           # 同上，但宿主是真 Ling 窗口
+<python> build-support/release.py --tag vX.Y.Z ...    # 打 GitHub Release 并上传产物
 <python> build-support/_probe_config.py              # config.json 生成/读值/兜底/不覆盖（6 项）
 <python> build-support/_probe_remove_item.py         # 删除与边界（含空 Dock）（5 项）
 <python> build-support/_probe_ui_remove.py           # 真实 UI 走一遍"从 Dock 移除"
@@ -240,13 +279,15 @@ bash build-support/build.sh
 Src/
   main.cpp            入口：DPI 感知 → 单实例 mutex → Ling::init → 建 DockWin → 消息循环
   DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建、跟踪接线、
-                      自动隐藏状态机、全屏让位、AppBar 同步、显示环境变化重排
+                      自动隐藏状态机、全屏让位、AppBar 同步、显示环境变化重排、
+                      拖放（子类化拿 WM_DROPFILES）、悬停预览接线
   WindowTracker.h/.cpp  事件驱动窗口跟踪：shell hook + win event，分组 / 运行状态 / 全屏判定
                        + TaskbarCreated 广播（explorer 重启自愈）
                        + WM_DISPLAYCHANGE / WM_SETTINGCHANGE 广播（显示环境变化）
                        + 测试注入通道（WM_APP+100）
   EdgeHotZone.h/.cpp  自动隐藏热区：贴屏幕底边的 3px 全透明细窗
   AppBarReserve.h/.cpp  工作区预留（AppBar）+ 强杀自愈 + 死记录清扫
+  PreviewWin.h/.cpp   悬停预览气泡：DWM 缩略图做画面（独立顶层窗口）
   Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
   SingleInstance.h/.cpp  命名 mutex 单实例
   IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画 + 按下 / 弹跳 / 临时态
@@ -487,11 +528,69 @@ SetWindowPos(hwnd, nullptr, prcNewWindow->left, prcNewWindow->top, ...);  // ←
    同时它和 `WM_DPICHANGED` 的 `lParam` **都是指针**，而这是广播消息、谁都能往我们窗口投 ——
    跨进程投进来的指针指向对方地址空间，解引用就是读野指针，所以先 `IsBadStringPtrW` 再读。
 
+### 悬停预览：**DWM 缩略图**做画面，不截屏
+
+任务书 §9.7 要求"首选 `DwmRegisterThumbnail`（DWM 直接合成目标窗口的实时画面，
+零截图成本）… 刷新由事件驱动，**不要定时截屏**"。所以画面来源就用它，
+`PreviewWin` 只负责给它一块地方。
+
+⚠ 有三个坑：
+
+1. **宿主形态必须先实测，而且判据不能只看返回值。**
+   `DwmRegisterThumbnail` 对普通窗口 / `WS_EX_NOREDIRECTIONBITMAP` / `WS_EX_LAYERED`
+   **都返回 S_OK** —— 但返回值不代表画面真的合成上来了。可靠判据是
+   **拿 `PrintWindow` 拍宿主、数源窗口的颜色像素**（`_probe_dwm_thumb*.cpp` 就是这么做的）。
+   好消息：真 Ling 窗口（DirectComposition + `WS_EX_NOREDIRECTIONBITMAP`）实测
+   **可以做宿主**，任务书担心的限制不成立。
+2. **DWM 会把画面拉伸到 `rcDestination`，不管纵横比。** 所以目标矩形要自己按
+   源窗口比例算好再填（否则 16:9 的视频会被压成方的）。
+   同时用 `DWM_TNP_SOURCECLIENTAREAONLY` 只取客户区，别把标题栏和边框也缩进来。
+3. **最小化窗口拿不到画面。** 挑目标窗口时优先"可见且未最小化"的那个，
+   挑不出来才退回第一个（那时画面是空的，但位置和标题仍然对）。
+
+另外 `WinBase::~WinBase()` **不是虚函数** → `PreviewWin` 只能值语义持有
+（`DockWin` 的成员），绝不能通过 `WinBase*` 删除，否则析构不跑、缩略图句柄泄漏。
+
+### 拖放：**子类化** Ling 窗口拿 `WM_DROPFILES`
+
+Ling 的 `WinBase` 没有通用消息钩子，而拖放是"消息进窗口过程"才拿得到的东西。
+三条路里选了**子类化**（另两条：改 Ling 加钩子要动别人的库；用覆盖窗口收拖放会
+挡住 dock 自己的 hover 命中）：
+
+```cpp
+s_self = this;   // ⚠ 用自己的静态指针取 this
+origWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)&DockWin::subclassProc);
+DragAcceptFiles(hwnd, TRUE);
+
+LRESULT CALLBACK DockWin::subclassProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_DROPFILES) { s_self->onDropFiles((HDROP)wp); return 0; }
+    return CallWindowProcW(s_self->origWndProc, h, m, wp, lp);   // 其余一律转回 Ling
+}
+```
+
+⚠ **取 this 不要读 `GWLP_USERDATA`** —— 那里是 Ling 自己的 `WinBase*`。
+`_probe_subclass.cpp` 实测确认过它没被我们改坏，但拿它向下转型属于依赖 Ling 内部布局。
+
+⚠ 子类化是"**包一层**"不是"换一个"：其余消息必须 `CallWindowProcW` 转回原过程，
+否则 dock 会整个失去输入与绘制处理。
+
+⚠ 测试这类功能不必真拖鼠标：`WM_DROPFILES` 的 `HDROP` 本质上就是一块
+`DROPFILES` 结构 + 双 `\0` 结尾的文件名列表，自己 `GlobalAlloc` 造一个再
+`PostMessage` 就行（`_probe_drop.py` 就是这么做到全自动的）。
+
 ## 已知限制 / 下一步
 
-- 悬停标签（名称气泡）未做（属阶段五"悬停预览"）。
+- **多窗口预览还是"取第一个窗口"**，没做成任务书 §2 #17 / #16 说的**列表**
+  （每窗口一张缩略图 + 标题）。单窗口预览、画面来源、位置都通了，列表是排列与
+  多缩略图管理的事，下一步补。
+- 悬停**名称气泡**（纯文字标签）未做 —— 预览气泡已经覆盖了"看这是哪个应用"的需求，
+  但任务书 §3 的标签规格还没实现。
 - 配置**改动后需要手动"重新载入配置"**（或重启）才生效；文件变更监听（`ReadDirectoryChangesW`）未做。
-- 拖放排序 / 拖放添加未做（属阶段五）。
+- **拖放不支持目录**（拖文件夹进来会被跳过并记日志）：语义不明确 —— 是复制整个目录树，
+  还是只当路径参数？这要按 §1 原则裁量后再做。
+- 拖放用的是 `WM_DROPFILES` 而不是 OLE `IDropTarget`，所以**拿不到拖放过程事件**
+  （DragEnter/DragOver/DragLeave），也就没法"按图标区分光标形状"
+  （拖到程序图标 vs 文件夹图标，现在都是同一个光标）。
 - 菜单用的是系统默认 UI 字体，与面板自绘风格不完全统一。
   自绘菜单需要 owner-draw，而 `WM_DRAWITEM` 要发给 owner 窗口 ——
   Ling 的 `WinBase` 不暴露消息口，得先有个能收消息的中间窗口（跟踪器的接收窗口可以，
@@ -513,3 +612,4 @@ SetWindowPos(hwnd, nullptr, prcNewWindow->left, prcNewWindow->top, ...);  // ←
 > 已修（v0.1.4）：~~显示器变化（`WM_DISPLAYCHANGE` / DPI）没有处理~~ →
 > 已有 `onDisplayChanged` + `onDpiChanged` 双来源重排；
 > ~~全屏让位只在自动隐藏开启时生效~~ → 两者已解耦。
+> 已完成（v0.1.5）：~~拖放排序 / 拖放添加未做~~ → 拖文件打开已做。

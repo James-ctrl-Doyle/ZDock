@@ -1,5 +1,118 @@
 # CHANGELOG
 
+## 0.1.5 · 阶段五（悬停预览 / 拖文件打开）— 2026-09-27
+
+让 Dock 能"看见"窗口、也能"接住"文件：鼠标停在图标上弹出该应用的**实时画面**，
+把文件拖到图标上用对应程序打开（拖到文件夹图标则复制进去）。
+
+### 先验的两个最贵假设（任务书 §14.2 要求"先最小 demo 实测再集成"）
+
+**① Ling 窗口能不能当 DWM 缩略图宿主？** —— 能。
+
+任务书 §9.7 提醒"宿主窗口形态可能限制缩略图可用性（例如 layered 窗口做不了宿主）"，
+而 ZDock 主窗口是 DirectComposition 栈、带 `WS_EX_NOREDIRECTIONBITMAP`
+（字面意思就是"没有重定向表面"），所以这条**必须实测**。
+两个 demo 一起给出了答案（`build-support/_probe_dwm_thumb.cpp` + `_probe_dwm_thumb_ling.cpp`）：
+
+| 宿主形态 | `DwmRegisterThumbnail` | 画面是否合成进来 |
+|---|---|---|
+| 普通窗口 | S_OK | **是**（品红像素 19200/19200） |
+| `WS_EX_NOREDIRECTIONBITMAP` | S_OK | **是** |
+| `WS_EX_LAYERED` | S_OK | **是** |
+| **真 Ling 窗口**（NOREDIRECTIONBITMAP、非 layered） | S_OK | **是** |
+
+结论：三种形态都行，**任务书担心的限制在 Ling 窗口上不成立**，DWM 缩略图路线可用。
+（判据不能只看 `DwmRegisterThumbnail` 的返回值 —— 它对三种都返回 S_OK；
+必须**数宿主截图里的源窗口像素**才知道画面有没有真的上来。）
+
+**② 能不能从外部"子类化" Ling 窗口拿消息？** —— 能。
+
+Ling 的 `WinBase` 只暴露 `onCreated` / `onHitTest` / `onMinMaxInfo` / `setCursor` / `layout`
+和一组 winrt 事件，**没有通用消息钩子**，也不处理 `WM_DROPFILES` ——
+而拖放恰恰是"消息进窗口过程"才拿得到的东西。三条路里：
+
+- 改 Ling 加钩子 → 要动别人的库、发新版本
+- 用覆盖窗口收拖放 → 会挡住 dock 自己的 hover 命中，功能打架
+- **子类化 Ling 窗口** → 纯 ZDock 侧、零 Ling 改动 ← 选它
+
+`_probe_subclass.cpp` 实测：能收到投给该窗口的消息、
+**Ling 存在 `GWLP_USERDATA` 里的 self 指针不受影响**、原 wndProc 转发链正常、可还原。
+
+### 新增：悬停预览（`Src/PreviewWin.h/.cpp`）
+
+- 鼠标在图标上停留 **300ms** → 弹出预览气泡，显示该应用窗口的**实时画面**；
+  鼠标离开图标即收起。延迟用一次性定时器实现（红线 4 的例外条款允许"自身 UI 状态"短定时器）。
+- 画面来源 = **DWM 缩略图**，DWM 直接合成目标窗口 —— **零截图成本**，
+  也不用定时刷新（任务书 §9.7："刷新由事件驱动，不要定时截屏"）。
+- 预览是**独立顶层窗口**（`TOPMOST | TOOLWINDOW | NOACTIVATE`）：dock 窗口只有面板那么高，
+  预览要浮在图标**上方**，只能另开窗口。
+- **保持源窗口纵横比**：DWM 会把画面**拉伸**到 `rcDestination`（不管比例），所以自己算目标矩形；
+  用 `DWM_TNP_SOURCECLIENTAREAONLY` 只取客户区（不把标题栏缩进来）。
+- 目标窗口优先挑"可见且未最小化"的 —— DWM 对最小化窗口只能拿到空画面。
+- 窗口**按需创建**（没人悬停就不建），退出时注销缩略图句柄。
+
+⚠ 两个实现细节：
+
+1. `WinBase::~WinBase()` **不是虚函数**（写 `override` 会 C3668）→ `PreviewWin` 只能
+   **值语义**持有（`DockWin` 的成员），绝不能通过 `WinBase*` 删除，否则漏掉析构、
+   DWM 缩略图句柄就泄漏了。
+2. 窗口类名是**全局统一**的（`setAppWindowClassName(L"ZDock")`），dock 主窗口和预览窗口
+   类名相同 → 给预览显式设了标题 `ZDockPreview` 以便区分（探针也靠它）。
+
+### 新增：拖文件打开（任务书 §2 #20）
+
+- 拖文件到**程序图标**上松手 → 用该程序打开（多文件组成引号包裹的参数串）；
+- 拖到**文件夹图标**上松手 → `SHFileOperationW(FO_COPY)` 复制进去（带 `FOF_ALLOWUNDO` 可撤销）；
+- 落到非图标区（halo）→ 忽略；拖进来的是目录 → 跳过并记日志。
+
+实现靠**子类化** dock 窗口 + `DragAcceptFiles`：
+
+```cpp
+// create() 里
+s_self = this;
+origWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)&DockWin::subclassProc);
+DragAcceptFiles(hwnd, TRUE);
+// subclassProc 只拦 WM_DROPFILES，其余一律 CallWindowProcW 转回 Ling
+```
+
+⚠ 取 this 用**自己的静态指针**，不读 `GWLP_USERDATA` —— 那里是 Ling 的 `WinBase*`，
+拿它向下转型虽然当下能用，但那是依赖 Ling 的内部布局。
+
+### 测试
+
+`build-support/_probe_drop.py`（**14/14**）：
+
+| 覆盖 | 结果 |
+|---|---|
+| 拖 2 个文件到文件夹图标 | 两个文件**真的出现在**目标文件夹 + 日志 `已复制 2 个文件` |
+| 拖到程序图标 | 走到"用该程序打开"分支（用不存在的 exe，零副作用地证明分支被走到） |
+| 拖到非图标区（halo） | 日志 `落点不在图标上 → 忽略`，且**没有误复制** |
+| 拖目录进来 | 日志 `跳过目录`，目标文件夹里没出现它 |
+
+`build-support/_probe_preview.py`（**13/13**）：
+
+| 覆盖 | 结果 |
+|---|---|
+| 悬停前 | **没有**预览窗口（按需创建） |
+| 悬停 300ms 后 | 弹出预览窗口；日志 `显示预览：目标=0x… 标题=「Python」` |
+| 位置 | 贴在**图标顶边**上方、水平对齐图标 |
+| **画面** | 预览窗口里数到 **46128 个品红像素** → DWM 缩略图**确实合成进来了** |
+| 移开鼠标 | 预览收起 |
+
+⚠ 拖放探针是**全自动**的：`WM_DROPFILES` 的 `HDROP` 本质上就是一块
+`DROPFILES` 结构 + 双 `\0` 结尾的文件名列表，所以可以自己 `GlobalAlloc` 造一个再
+`PostMessage` —— **不用真拖鼠标**（实测跨进程投递也是可用的）。
+
+⚠ 预览探针里"图标索引"是**从日志推出来的**，不能假设它是 0：
+本机 WorkBuddy / Chrome / explorer / cmd / python 都在跑，它们都会变成临时图标
+（`syncWithTracker()` 按 `tracker.groups()` 的顺序补临时图标，而 tracker 的
+`全量重建` 日志正是按同一顺序打印分组）。
+
+回归全绿：阶段一 **24/24**、阶段三 **13/13**、阶段四 **48/48**、
+显示环境 **26/26**、拖放 **14/14**、预览 **13/13**。
+
+版本号 0.1.4.0 → 0.1.5.0。
+
 ## 0.1.4 · 阶段四（AppBar 预留 / 自动隐藏 / 全屏让位）— 2026-09-27
 
 让 Dock 学会"让开"：没人用的时候滑出屏幕，有人碰屏幕边缘再滑回来；
