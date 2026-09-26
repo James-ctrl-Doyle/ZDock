@@ -1,17 +1,16 @@
+param(
+    [string]$Exe = 'C:\Users\zqw35\WorkBuddy\projects\ZDock\_review\ZDock_0.1.5.exe'
+)
 $ErrorActionPreference = 'Stop'
 $out = 'C:\Users\zqw35\WorkBuddy\projects\ZDock\build\_review\_exe_version.txt'
-$f = 'C:\Users\zqw35\WorkBuddy\projects\ZDock\_review\ZDock_0.1.4.exe'
-$items = @(
-    (Get-Item $f).VersionInfo
-)
+$v = (Get-Item $Exe).VersionInfo
 $lines = @()
-$lines += 'path           = ' + $f
-$lines += 'size           = ' + (Get-Item $f).Length
-$lines += 'FileVersion    = ' + $items[0].FileVersion
-$lines += 'ProductVersion = ' + $items[0].ProductVersion
-$lines += 'FileDescription= ' + $items[0].FileDescription
-$lines += 'ProductName    = ' + $items[0].ProductName
-$lines += 'LegalCopyright = ' + $items[0].LegalCopyright
-$lines += 'CompanyName    = ' + $items[0].CompanyName
-$lines += 'OriginalFilename = ' + $items[0].OriginalFilename
+$lines += 'path             = ' + $Exe
+$lines += 'size             = ' + (Get-Item $Exe).Length
+$lines += 'FileVersion      = ' + $v.FileVersion
+$lines += 'ProductVersion   = ' + $v.ProductVersion
+$lines += 'FileDescription  = ' + $v.FileDescription
+$lines += 'ProductName      = ' + $v.ProductName
+$lines += 'LegalCopyright   = ' + $v.LegalCopyright
+$lines += 'CompanyName      = ' + $v.CompanyName
 $lines | Out-File -FilePath $out -Encoding utf8
