@@ -1,0 +1,7 @@
+# 源码与脚本一律 LF（Windows 上的 MSVC / rc 都吃 LF；换行漂移会把 diff 搅乱）
+* text=auto eol=lf
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+*.rc text eol=crlf
+*.ico binary
+*.png binary

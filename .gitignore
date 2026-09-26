@@ -1,0 +1,10 @@
+# 构建产物
+/build/
+
+# 本地产物（截图、临时件）
+/_review/
+
+# MSVC / VS 用户文件
+*.user
+*.suo
+/.vs/
