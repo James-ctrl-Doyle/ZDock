@@ -56,6 +56,8 @@ SRCS=(
     "$ROOT/Src/Config.cpp"
     "$ROOT/Src/SingleInstance.cpp"
     "$ROOT/Src/WindowTracker.cpp"
+    "$ROOT/Src/EdgeHotZone.cpp"
+    "$ROOT/Src/AppBarReserve.cpp"
     "$ROOT/Src/IconLoader.cpp"
     "$ROOT/Src/IconNode.cpp"
     "$ROOT/Src/IndicatorNode.cpp"

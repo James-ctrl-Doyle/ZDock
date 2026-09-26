@@ -53,6 +53,27 @@ namespace zdock {
 		/// <summary>面板圆角（逻辑像素）。</summary>
 		float cornerRadius{ 12.f };
 
+		// ---------------- 阶段四：自动隐藏 / 工作区预留 ----------------
+
+		/// <summary>
+		/// 自动隐藏：鼠标离开 dock 且无悬停 / 菜单会话 → 滑出屏幕边缘；
+		/// 鼠标触到停靠边的热区 → 滑入。默认关。
+		/// </summary>
+		bool autoHide{ false };
+		/// <summary>鼠标离开到开始滑出的延迟（毫秒）。任务书 §5 定 500。</summary>
+		int  autoHideDelayMs{ 500 };
+		/// <summary>滑入动画时长（毫秒）。任务书 §3 定 200。</summary>
+		int  slideInMs{ 200 };
+		/// <summary>滑出动画时长（毫秒）。任务书 §3 定 300。</summary>
+		int  slideOutMs{ 300 };
+		/// <summary>全屏应用在前台时保持隐藏（自动隐藏开启时才有意义）。</summary>
+		bool hideOnFullscreen{ true };
+		/// <summary>
+		/// 工作区预留（AppBar）：向系统申请把工作区从停靠边缩进，普通窗口最大化
+		/// 时不会盖住 dock。默认**关** —— 关了 dock 就是一块浮在最上层的窗口。
+		/// </summary>
+		bool reserveWorkArea{ false };
+
 		/// <summary>Dock 上的图标列表。空 = 用内置默认表。</summary>
 		std::vector<ItemConfig> items;
 

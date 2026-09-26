@@ -3,8 +3,11 @@
 #include "IconNode.h"
 #include "IndicatorNode.h"
 #include "WindowTracker.h"
+#include "EdgeHotZone.h"
+#include "AppBarReserve.h"
 #include <vector>
 #include <string>
+#include <filesystem>
 
 namespace zdock {
 
@@ -59,6 +62,8 @@ namespace zdock {
 		static constexpr float kSideSlack = 48.f;   // 面板左右各留的透明区
 		static constexpr float kHoverSigma = 1.0f;  // 鱼眼衰减（以图标位距为单位）
 		static constexpr int   kTimerHover = 1;     // 判定"鼠标已移出"的兜底定时器
+		static constexpr int   kTimerAutoHide = 2;  // 自动隐藏延迟 / 滑动补间（阶段四）
+		static constexpr int   kTimerSlide = 3;     // 滑动动画补间（阶段四）
 		static constexpr int   kMenuExit = 101;
 		static constexpr int   kMenuOpen = 102;
 		static constexpr int   kMenuOpenAdmin = 103;
@@ -157,6 +162,93 @@ namespace zdock {
 		/// <summary>取某图标对应的分组（没有则 nullptr）。</summary>
 		const AppGroup* groupOfItem(size_t index) const;
 
+		// =====================================================================
+		// 阶段四：自动隐藏 / 全屏让位 / 工作区预留
+		// =====================================================================
+
+		// ---- 窗口定位（阶段四抽出来，替代原先三份重复代码）----
+
+		/// <summary>
+		/// dock 所在监视器的完整矩形（rcMonitor，物理像素）。
+		/// ⚠ 定位 dock 一律以它为基准 —— 不要用 SPI_GETWORKAREA，那会被
+		/// AppBar 预留改掉，构成自引用反馈回路（见 .cpp 里 dockRectShown 注释）。
+		/// </summary>
+		RECT monitorRect() const;
+
+		/// <summary>
+		/// dock 面板在屏幕上的目标矩形（物理像素，**展开态**）。
+		/// 底边 = 屏幕底边 − bottomMargin，水平居中于屏幕。
+		/// </summary>
+		RECT dockRectShown() const;
+
+		/// <summary>
+		/// 应用窗口位置：`offsetY` 是额外的垂直位移（物理像素，正数 = 往下）。
+		/// 展开态传 0；隐藏态传"面板高度 + 一点余量"。
+		/// 内部会调 setSize/setPosition（都是物理像素，不乘 dpi）。
+		/// </summary>
+		void applyDockPlacement(int offsetY = 0);
+
+		// ---- 自动隐藏状态机 ----
+
+		/// <summary>
+		/// 从配置刷新自动隐藏相关的缓存，并按需要创建 / 销毁热区窗口。
+		/// create() 与 reloadConfig() 后各调一次。
+		/// </summary>
+		void applyAutoHideConfig();
+
+		/// <summary>执行滑入（展开）。热区触发 / 鼠标回到面板上时调。</summary>
+		void slideIn();
+
+		/// <summary>执行滑出（隐藏）。延迟到期后调。</summary>
+		void slideOut();
+
+		/// <summary>当前是否处于"已隐藏"（滑出完成）状态。</summary>
+		bool hidden() const { return slideState == SlideState::Hidden; }
+
+		/// <summary>
+		/// 记一次"还在用 dock"（鼠标在面板上 / 菜单开着 / 悬停中）。
+		/// 会取消待执行的滑出。
+		/// </summary>
+		void keepVisible();
+
+		/// <summary>鼠标离开面板时调：启动 500ms 延迟滑出。</summary>
+		void scheduleHide();
+
+		/// <summary>滑动动画的定时器回调（补间）。</summary>
+		void tickSlide();
+
+		/// <summary>
+		/// 当前是否应该隐藏（自动隐藏开着 且 （全屏应用在前台 且 hideOnFullscreen））。
+		/// 注意"鼠标还在面板上"不算 —— 那由 keepVisible 的延迟管。
+		/// </summary>
+		bool shouldHideNow() const;
+
+		/// <summary>
+		/// 鼠标此刻是否压在 dock 窗口上（WindowFromPoint，会考虑 halo 穿透 region）。
+		/// ⚠ 只在滑入动画结束这类离散时刻调，**不轮询**（红线 4）。
+		/// </summary>
+		bool cursorOverDock() const;
+
+		/// <summary>热区窗口该在的屏幕矩形（物理像素）。</summary>
+		RECT hotZoneRect() const;
+
+		/// <summary>按当前状态重建 / 移动 / 销毁热区窗口。</summary>
+		void syncHotZone();
+
+		/// <summary>全屏状态变化时的处理（隐藏 / 恢复）。</summary>
+		void onFullscreenChanged(bool on);
+
+		// ---- 工作区预留（AppBar）----
+
+		/// <summary>按配置注册 / 注销 AppBar。返回是否处于已注册态。</summary>
+		bool syncAppBar();
+
+		/// <summary>强杀自愈用的状态文件路径（exe 同目录 zdock-appbar.state）。</summary>
+		std::wstring appBarStatePath() const;
+
+		/// <summary>explorer 重启（TaskbarCreated 广播）后的自愈：重注册 AppBar + 跟踪器。</summary>
+		void onTaskbarCreated();
+
 		float px(float logical) const { return logical * dpi; }
 		float panelW() const;
 		float panelH() const;
@@ -172,6 +264,45 @@ namespace zdock {
 		WindowTracker tracker;
 		/// 跟踪器最近一次通知时的"运行中分组键集合"，用来判断要不要做结构增删。
 		std::vector<std::wstring> lastRunningKeys;
+
+		// ---- 阶段四状态 ----
+		enum class SlideState { Shown, Sliding, Hidden };
+
+		/// 来自 config.json 的自动隐藏参数（逻辑像素 / 毫秒）
+		bool  cfgAutoHide{ false };
+		int   cfgHideDelayMs{ 500 };
+		int   cfgSlideInMs{ 200 };
+		int   cfgSlideOutMs{ 300 };
+		bool  cfgHideOnFullscreen{ true };
+		bool  cfgReserveWorkArea{ false };
+
+		SlideState slideState{ SlideState::Shown };
+		/// 滑动的进度（0 = 完全展开，1 = 完全滑出）与本次滑动的起止/时刻
+		float slideT{ 0.f };
+		float slideFrom{ 0.f };
+		float slideTo{ 0.f };
+		ULONGLONG slideStartTick{ 0 };
+		int   slideDurMs{ 300 };
+		bool  slideTimerOn{ false };
+
+		/// 自动隐藏延迟定时器是否开着（500ms 那条）
+		bool  hideDelayTimerOn{ false };
+		/// 展开态下窗口的左上角（物理像素）。滑动时以它为基准做偏移。
+		POINT shownOrigin{ 0, 0 };
+
+		EdgeHotZone hotZone;
+		AppBarReserve appBar;
+
+		/// 当前是否有全屏应用在前台。来源 = WindowTracker 的 onFullscreenChanged
+		/// （自动化测试也会通过热区的注入通道喂它，见 EdgeHotZone::onTestInject）。
+		/// ⚠ 用它而不是直接问 tracker：tracker 的状态更新有自己的时机，
+		///   而 dock 的判定必须和"最后一次收到的全屏通知"严格一致，
+		///   否则注入测试时会出现"通知说全屏、tracker 说没有"的分裂。
+		bool fullscreenNow{ false };
+
+		/// 菜单 / 拖放会话计数（>0 时绝不隐藏）。
+		/// 菜单是模态的，弹之前 +1、弹完 −1。
+		int menuSessions{ 0 };
 	};
 
 } // namespace zdock

@@ -2,8 +2,9 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段三（窗口跟踪 / 运行指示 / 临时图标）已完成**
-（阶段一 gate 24/24，阶段二 12 项、阶段三 13 项探针全 PASS；两个 bug 已根因级修复，见 `CHANGELOG.md`）。
+当前进度：**阶段四（AppBar 预留 / 自动隐藏 / 全屏让位）已完成**
+（阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项探针全 PASS；
+过程中挖出的 4 个 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -25,6 +26,22 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 - **图标级右键菜单**：固定项给 打开 / 以管理员身份打开 / 从 Dock 移除；
   临时项给 固定到 Dock / 关闭全部窗口
 - **空白处右键菜单**：添加程序… / 重新载入配置 / 退出 ZDock（手改配置不必重启进程）
+- **自动隐藏**（`Src/EdgeHotZone.*`）：鼠标离开 + 无悬停/拖放/菜单会话 → 约 **500ms** 后
+  滑出屏幕，**200ms 滑入 / 300ms ease-out 滑出**。触发展开靠一条贴屏幕底边、**3px 厚**、
+  宽 `max(dock 宽, 屏宽/2)` 的**全透明细窗**（`WS_EX_NOACTIVATE | TOOLWINDOW | TOPMOST | LAYERED`）
+  —— **不用鼠标钩子、不轮询**（红线 4/5）。
+- **全屏让位**：有全屏应用在前台时 dock 保持隐藏（可配 `hideOnFullscreen: false` 关掉）。
+  全屏期间碰热区也不会拱出来。
+- **工作区预留（AppBar，默认关）**：`SHAppBarMessage` 的
+  `ABM_NEW / ABM_QUERYPOS / ABM_SETPOS / ABM_REMOVE` + `ABN_*` 通知，
+  申请后普通窗口最大化会自动避开 dock 那 95px。**绝不碰桌面窗口 / 任务栏状态**。
+- **强杀自愈**（红线 7）：AppBar 的注销是应用自己的责任 —— 被 `taskkill /F` 之后
+  shell 会一直保留那条记录（实测等 15 秒也不恢复）。ZDock 用**状态文件**
+  （`zdock-appbar.state`，exe 同目录）记下抢占前的工作区，下次启动发现它还在就
+  ① `SPI_SETWORKAREA` 写回干净值 ② 跑一次 `NEW/SETPOS(空)/REMOVE` 把 shell 里的
+  死记录扫掉（**不扫掉的话再注册会叠加，工作区被占两道**），然后正常注册。详见下文。
+- **explorer 重启自愈**：监听 `RegisterWindowMessageW(L"TaskbarCreated")` 广播，
+  重新注册 AppBar 与 shell hook（任务栏重建后协调关系会失效）。
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
 - 单实例：**自己命名的 mutex**（`Src/SingleInstance.*`）——
@@ -63,9 +80,26 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 | 自动回收 | 关掉它 → `运行 4 组，共 8 项（其中临时 3）` |
 | 点击不崩 | `PostMessage` 投递左键到图标位置后进程存活 |
 
+阶段四实测（`_probe_stage4.py`，**48/48 通过**）：
+
+| 覆盖 | 结果 |
+|---|---|
+| 自动隐藏关闭 | 日志说明未启用，**没有热区窗口**（不留看不见却吃点击的隐形窗） |
+| 热区几何 | 厚 **3px**、贴**屏幕**底边、宽 ≥ 屏宽/2、`NOACTIVATE` / `TOOLWINDOW` / `TOPMOST` / `LAYERED` 全对 |
+| 热区触发 | `PostMessage(WM_MOUSEMOVE)` → 日志 `[hotzone] 鼠标进入，触发滑入`（**不移动真实光标**） |
+| AppBar 关闭 | 不注册，工作区不动（1440 → 1440） |
+| AppBar 开启 | 注册成功，工作区底 **1440 → 1345**，正好抬升 **95px**（= 面板高） |
+| 全屏让位 | 注入全屏 → dock 滑到屏幕外（顶=1440）、日志有 `滑出开始`；退出 → 滑回；鼠标不在 dock 上时自动收回 |
+| 全屏期间碰热区 | dock **保持隐藏**（不拱出全屏画面） |
+| 强杀自愈（红线 7） | 强杀后工作区确实留在 1345（复现系统限制）→ 重启：日志 `强杀自愈：工作区从 (0,38)-(2560,1345) 恢复到 (0,38)-(2560,1440)` + `清残留` 循环完成 → 重新只占 **95px**（不叠加） |
+| 正常退出 | 工作区底回到 1440，`zdock-appbar.state` 被删 |
+| explorer 重启 | 广播 `TaskbarCreated` → `收到 TaskbarCreated 广播` + `自愈完成`，热区仍在、进程存活 |
+| 可重复性 | 探针连跑两轮均 48/48，环境自检 `干净工作区上注册 1px AppBar 只吃掉 0px` |
+
 截图见 `build/_review/`：`zdock_idle.png` / `zdock_hover.png`（阶段一）、
 `stage2_default.png` / `stage2_hover.png` / `stage2_menu.png` / `stage2_menu_global.png`（阶段二）、
-`stage3_default.png` / `stage3_temp_icon.png` / `stage3_hover.png` / `stage3_menu_temp.png`（阶段三）。
+`stage3_default.png` / `stage3_temp_icon.png` / `stage3_hover.png` / `stage3_menu_temp.png`（阶段三）、
+`stage4_1_展开态.png` / `stage4_2_隐藏态滑出.png` / `stage4_3_工作区预留.png`（阶段四）。
 
 ## 配置
 
@@ -77,16 +111,27 @@ exe 同目录的 `config.json`，首次启动自动生成。全部字段与默�
   "iconGap": 12,           // 图标间距，[0, 128]
   "hoverScale": 1.7,       // 悬停峰值缩放，[1, 4]
   "animMs": 150,           // 放大/缩回动画时长（毫秒），[0, 2000]
-  "bottomMargin": 6,       // 面板距工作区底边（逻辑像素），[0, 400]
+  "bottomMargin": 6,       // 面板距屏幕底边（逻辑像素），[0, 400]
                            //   任务栏设成自动隐藏时调大些可少抢底部热区
   "bgColor": "#1A1A1ACC",  // 面板背景色：#RRGGBB 或 #RRGGBBAA
   "cornerRadius": 12,      // 面板圆角，[0, 128]
+  "autoHide": false,       // 自动隐藏：鼠标离开约 500ms 后滑出屏幕
+  "autoHideDelayMs": 500,  // 离开到滑出的延迟（毫秒），[0, 10000]
+  "slideInMs": 200,        // 滑入动画时长，[0, 3000]
+  "slideOutMs": 300,       // 滑出动画时长（ease-out），[0, 3000]
+  "hideOnFullscreen": true,// 有全屏应用在前台时保持隐藏
+  "reserveWorkArea": false,// 向系统申请工作区（AppBar）—— 最大化窗口会避开 dock
   "items": [               // 图标列表；顺序即显示顺序
     { "path": "C:\\Windows\\explorer.exe" },
     { "path": "C:\\Windows\\System32\\notepad.exe", "name": "记事本" }
   ]
 }
 ```
+
+- `autoHide` / `reserveWorkArea` **默认都是关的** —— 两个都会明显改变桌面行为
+  （一个让 dock 时隐时现、一个改工作区），要用户自己决定。
+- 开 `reserveWorkArea` 时屏幕上会多一个 exe 同目录的 `zdock-appbar.state`
+  （记抢占前的工作区，正常退出会删）。**别手删**：它是强杀后自愈的依据。
 
 - `name` 可省略，省略时从文件名推。`items` 为空数组 = 故意清空 Dock，不会被塞回默认。
 - **数值超范围回默认值**（不是钳到边界）—— 填 9999 明显是笔误，钳成 256 会得到一个
@@ -105,7 +150,7 @@ bash build-support/build.sh
 - 直接调 `cl.exe / link.exe / rc.exe`，**不走 MSBuild**（本机没有 .NET SDK，也不需要）。
 - Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-v1.3.0-x64`（发布包）→ `../Ling`（源码树）。
   `LING_FROM_SOURCE=1` 强制用源码树。
-- 产物：`build/bin/ZDock.exe`（约 340 KB）。
+- 产物：`build/bin/ZDock.exe`（约 830 KB）。
 
 依赖的硬约定（踩过的坑，改构建脚本前先看 `build-support/build.sh` 里的注释）：
 
@@ -126,25 +171,38 @@ bash build-support/build.sh
 <python> build-support/zdock_stage1_test.py          # 阶段一 gate（约 30s）
 <python> build-support/_probe_track_api.py           # 阶段三最贵假设：跟踪 API 是否可用（5 项）
 <python> build-support/_probe_stage3.py              # 阶段三：跟踪/指示器/临时图标（13 项）
+<python> build-support/_probe_stage4.py              # 阶段四：自动隐藏/全屏让位/AppBar/自愈（48 项）
 <python> build-support/_probe_config.py              # config.json 生成/读值/兜底/不覆盖（6 项）
 <python> build-support/_probe_remove_item.py         # 删除与边界（含空 Dock）（5 项）
 <python> build-support/_probe_ui_remove.py           # 真实 UI 走一遍"从 Dock 移除"
 <python> build-support/_probe_ui_add.py              # 真实 UI 走一遍"添加程序…"
 <python> build-support/_shot_stage2.py               # 阶段二验收截图
 <python> build-support/_shot_stage3.py               # 阶段三验收截图
+<python> build-support/_shot_stage4.py               # 阶段四验收截图
 <python> build-support/_probe_hover_jitter.py        # 悬停抖动量化（阶段一 bug 2 的回归）
 <python> build-support/_probe_cross_instance.py      # ZPin/ZDock 共存（阶段一 bug 1 的回归）
 ```
 
+⚠ **跑阶段四探针前注意工作区可能被上次的残留占着。** 探针自己会在开跑时做环境自检
+（`_probe_stage4.py` 的 `probe_shell_stale()`）并打印
+`环境自检：干净工作区上注册 1px AppBar 只吃掉 Npx`。**N 明显大于 1 就说明有残留**，
+这时"抬升多少像素"的判据会偏大（实测踩过：脏起点下量出 183px，看着像叠加了两份）。
+探针会在 `case_appbar()` 里先扫一遍残留，正常情况下会自愈到 0~1px。
+
 ⚠ **验证原则：不抢用户的输入焦点。** 优先走两条路 ——
 
-1. **日志取证**：关键状态变化（分组集合、指示器坐标）都写日志，探针读日志判断；
+1. **日志取证**：关键状态变化（分组集合、指示器坐标、滑入滑出、AppBar 注册/自愈）都写日志；
 2. **`PostMessage` 注入**：需要驱动鼠标事件时把 `WM_LBUTTONDOWN/UP` 投递到目标窗口，
    不移动真实光标。
 
 只有"悬停放大"这类必须真实光标位置的场景才用 `SetCursorPos`，且用完立刻恢复。
 （阶段二曾用 `SetCursorPos + mouse_event` 去点模态菜单，把用户的 WorkBuddy 焦点抢走、
 对话任务被取消 —— 所以阶段三改成上面这套。）
+
+**全屏让位**这条链路的真值来自 `GetForegroundWindow()`，要造一个真全屏前台窗口就得
+`SetForegroundWindow` —— 那必然抢焦点。所以阶段四在热区窗口上留了一条**注入通道**
+（`EdgeHotZone::kMsgTestInject = WM_APP + 100`）：探针 `PostMessage` 直接把"全屏状态"
+喂进 `DockWin::onFullscreenChanged()`。正常运行时没有任何代码会发这条消息。
 
 涉及真实 UI 的两个脚本（`_probe_ui_*` / `_shot_stage2.py`）仍**会模拟鼠标点击与光标移动**，
 跑的时候不要去动键盘鼠标。它们全程在**隔离临时目录**里跑（复制一份 exe 过去），
@@ -158,8 +216,12 @@ bash build-support/build.sh
 ```
 Src/
   main.cpp            入口：DPI 感知 → 单实例 mutex → Ling::init → 建 DockWin → 消息循环
-  DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建、跟踪接线
+  DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建、跟踪接线、
+                      自动隐藏状态机、全屏让位、AppBar 同步
   WindowTracker.h/.cpp  事件驱动窗口跟踪：shell hook + win event，分组 / 运行状态 / 全屏判定
+                       + TaskbarCreated 广播（explorer 重启自愈）
+  EdgeHotZone.h/.cpp  自动隐藏热区：贴屏幕底边的 3px 全透明细窗（含测试注入通道）
+  AppBarReserve.h/.cpp  工作区预留（AppBar）+ 强杀自愈 + 死记录清扫
   Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
   SingleInstance.h/.cpp  命名 mutex 单实例
   IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画 + 按下 / 弹跳 / 临时态
@@ -170,7 +232,7 @@ Src/
 build-support/
   _msvc_env.sh        cl/link/rc 的最小环境
   build.sh            构建脚本（含残留进程守卫）
-  zdock_stage1_test.py, _probe_*.py, _shot_stage3.py   验证 / 诊断 / 截图
+  zdock_stage1_test.py, _probe_*.py, _shot_stage4.py   验证 / 诊断 / 截图
 ```
 
 ## 关键设计说明
@@ -329,6 +391,45 @@ Ling 的坐标/单位约定（实测，文档没写全）：
 一起打日志，一眼核对"指示器 y 是否 < 面板底边"。**算得对但画不对 → 怀疑单位/坐标系；
 算出来就超界 → 算法问题**，这一步区分能省掉大量瞎猜。
 
+### 阶段四的两个坑：**定位基准自引用** + **shell 的死 AppBar 记录**
+
+两个坑症状一样（工作区被占两道，95px 变 183px），根因完全不同，必须分开看。
+
+**坑 1：dock 定位不能用工作区当基准（自引用反馈回路）**
+
+`dockRectShown()` 最初写的是"底边 = `SPI_GETWORKAREA` 的底边 − bottomMargin"。
+而 AppBar 预留**改的就是工作区** —— 于是变成自引用：工作区被抬一次，
+下次算出来的 dock 位置就跟着上爬一次。日志里能看到批准矩形一路往上漂。
+
+改成锚**监视器的 `rcMonitor`** 之后位置恒定，AppBar 只负责把工作区让出 95px。
+**`hotZoneRect()`（热区位置）和滑出目标也必须一起改**，否则热区会跟着往上爬、
+最后鼠标够不到。
+
+**坑 2：强杀留下的死 AppBar 记录会叠加**
+
+AppBar 的注销（`ABM_REMOVE`）是应用自己的责任，shell **不检查**宿主窗口是否还活着。
+`taskkill /F` 之后工作区就一直保持缩进（实测等 15 秒也不恢复）。
+而且这条死记录会**叠加** —— 下次启动读到的"抢占前的值"本身就已经被占着了：
+
+```
+已记录抢占前工作区 (0,38)-(2560,1440)  → 已注册 → 工作区底 1345   ← 正常，占一份
+[强杀]
+已记录抢占前工作区 (0,38)-(2560,1345)  → 已注册 → 工作区底 1257   ← 叠加，占两份
+```
+
+**它在哪里**：`Shell_TrayWnd` 进程的内存态，注册表里没有 AppBar 记录表，
+所以外部没法直接改。
+
+**怎么清**（实测）：下一次 **`ABM_NEW → ABM_SETPOS(空矩形) → ABM_REMOVE` 完整循环**
+会让 shell 重扫一遍、把死记录丢掉。而只做 `NEW + SETPOS(真位置)`（= 正常注册路径）
+**清不掉**。所以 `AppBarReserve::purgeStaleRecord()` 专门跑一遍完整循环。
+
+**自愈的完整顺序**（`recoverStaleWorkArea`，两步都不能省）：
+
+1. 用状态文件里备份的值 `SPI_SETWORKAREA` 写回干净工作区；
+2. `purgeStaleRecord()` 把 shell 里的死记录扫掉；
+3. 之后才正常注册 —— 功能不降级，工作区只占一份。
+
 ## 已知限制 / 下一步
 
 - 悬停标签（名称气泡）未做。
@@ -340,6 +441,11 @@ Ling 的坐标/单位约定（实测，文档没写全）：
 - **UWP / 打包应用**：跟踪与分组已支持（走 AUMID），但**启动**还不行 ——
   临时图标没有传统 exe 路径，"固定到 Dock"、点击启动都会拒绝并记一行日志，
   需要走 `shell:AppsFolder\<AUMID>` 才行（属后续阶段）。
-- 自动隐藏（AppBar / 全屏让位）未做：跟踪器已经把全屏判定与回调预留好了
-  （`fullscreenActive()` / `onFullscreenChanged`），阶段四接上即可。
+- **AppBar 残留的系统限制**（实测，非本程序 bug）：AppBar 的注销是应用自己的责任，
+  进程被 `taskkill /F` 后 shell 会一直保留那条记录。ZDock 的自愈能把它扫掉，
+  但**如果 ZDock 从此再没启动过**，工作区就会一直缩进着。
+  这时手动跑一次 ZDock 或用 `SPI_SETWORKAREA` 复位即可（重启 explorer 也能清）。
+- AppBar **会与系统任务栏抢边缘空间**：任务栏在底部时两者会互相挤压，
+  所以默认关闭；开着的时候建议把任务栏固定在别的边。
+- 全屏让位只在**自动隐藏开启**时生效（跟任务书的语义一致：让位 = 滑出）。
 - 忽略键盘与无障碍。

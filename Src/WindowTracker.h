@@ -93,6 +93,14 @@ namespace zdock {
 		/// <summary>全屏应用进入 / 退出的判定变化时回调（参数 true = 有全屏应用在前台）。</summary>
 		std::function<void(bool)> onFullscreenChanged;
 
+		/// <summary>
+		/// explorer 重启（`TaskbarCreated` 广播）时回调（任务书 §2 功能表 #32）。
+		///
+		/// ⚠ 这个广播只发给**顶层窗口**，我们借自己的接收窗口收（它已经是顶层了）。
+		///   Ling 的 WinBase 不暴露消息口，收不了广播，所以只能在跟踪器这儿收。
+		/// </summary>
+		std::function<void()> onTaskbarCreated;
+
 		/// <summary>当前是否有全屏应用在前台。</summary>
 		bool fullscreenActive() const { return fullscreen; }
 
@@ -134,6 +142,8 @@ namespace zdock {
 
 		HWND msgHwnd{ nullptr };
 		UINT shellHookMsg{ 0 };
+		/// `TaskbarCreated` 注册消息号（explorer 重启时广播它）
+		UINT taskbarCreatedMsg{ 0 };
 		HWINEVENTHOOK hookMinimizeStart{ nullptr };
 		HWINEVENTHOOK hookMinimizeEnd{ nullptr };
 		HWINEVENTHOOK hookNameChange{ nullptr };

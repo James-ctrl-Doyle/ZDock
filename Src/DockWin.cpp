@@ -20,6 +20,10 @@ namespace zdock {
 		// ⚠ 跟踪器的钩子必须在窗口销毁**之前**摘掉：它的回调会用到本对象，
 		//   对象没了还留着钩子就是悬空指针。
 		tracker.stop();
+		// 热区窗口是独立顶层窗口，也得显式销毁（它不属于 Ling 的窗口体系）
+		hotZone.destroy();
+		// AppBar 注销：不注销的话工作区会一直缩着，用户得重启 explorer 才好。
+		appBar.unregister_();
 	}
 
 	float DockWin::panelW() const
@@ -59,6 +63,12 @@ namespace zdock {
 		cfgIconGap = cfg->iconGap;
 		cfgHoverPeak = cfg->hoverScale;
 		cfgAnimMs = cfg->animMs;
+		cfgAutoHide = cfg->autoHide;
+		cfgHideDelayMs = cfg->autoHideDelayMs;
+		cfgSlideInMs = cfg->slideInMs;
+		cfgSlideOutMs = cfg->slideOutMs;
+		cfgHideOnFullscreen = cfg->hideOnFullscreen;
+		cfgReserveWorkArea = cfg->reserveWorkArea;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -88,16 +98,10 @@ namespace zdock {
 		const float winH = kHaloH + panelH();
 		setSize(winW, winH);                            // 内部 ×dpi，之后本对象的 w/h 是物理像素
 
-		RECT work{};
-		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-		const int panelWpx = static_cast<int>(px(panelW()));
-		// 底边留白取自 config：任务栏自动隐藏时调大些可以少抢底部热区
-		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
-		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
-		const int winLeft = panelLeft - static_cast<int>(px(kSideSlack));
-		const int winTop = panelBottom - static_cast<int>(h);
-		setPosition(winLeft, winTop);
-		log(std::format(L"[dock] dpi={:.2f} 窗口物理 {}x{} @ ({},{})", dpi, w, h, winLeft, winTop));
+		// 定位统一走 applyDockPlacement（阶段四抽出来：原先 create/rebuild/
+		// relayoutForItemCount 各抄了一份，自动隐藏要在位置上做偏移，必须先收口）。
+		applyDockPlacement(0);
+		log(std::format(L"[dock] dpi={:.2f} 窗口物理 {}x{} @ ({},{})", dpi, w, h, x, y));
 
 		// 独立顶层窗口：不进 Alt+Tab/任务栏、永远置顶、点击面板不抢焦点。
 		// ⚠ 绝不 SetParent 到桌面 —— 那是把 explorer 拖垮的那条路（红线 1/2/3）。
@@ -115,6 +119,20 @@ namespace zdock {
 		//   把图标放大-缩回-放大（用户看到的"来回变大变小"）。
 		//   判断依据必须是**光标的真实位置**，见 refreshHoverFromCursor()。
 		onTimer.add([this](UINT id) {
+			if (id == kTimerAutoHide) {
+				// 延迟到期：再确认一次"确实没人用 dock"才滑出。
+				// 这段时间里用户可能又移回来了（keepVisible 会 kill 掉这个定时器）。
+				killTimer(kTimerAutoHide);
+				hideDelayTimerOn = false;
+				if (menuSessions > 0 || hoverIndex >= 0) return;
+				if (refreshHoverFromCursor()) return;   // 光标还在上面
+				slideOut();
+				return;
+			}
+			if (id == kTimerSlide) {
+				tickSlide();
+				return;
+			}
 			if (id != kTimerHover) return;
 			if (hoverIndex < 0) {
 				ensureHoverTimer(false);
@@ -149,6 +167,10 @@ namespace zdock {
 			const int idx = indexAtVisual(pt);
 			if (idx >= 0 && items[idx].node) items[idx].node->setPressed(true);
 			});
+
+		// 鼠标在面板上动 → 说明用户在用它，取消待执行的滑出（并滑入，如果还是隐藏态）。
+		onMouseMove.add([this](POINT) { keepVisible(); });
+
 		// 窗口没了就退进程：否则 DestroyWindow 之后消息循环还在空转，留一个
 		// "没窗口没托盘"的僵尸进程（ZPin 那边踩过同款）
 		onDestroy.add([] { Ling::App::get()->quit(0); });
@@ -161,6 +183,24 @@ namespace zdock {
 		// 跟踪器放最后启动：它一起来就会回调 syncWithTracker()，
 		// 那时界面必须已经完整（panel/row/图标都就位）。
 		startTracker();
+
+		// 阶段四：自动隐藏与工作区预留都依赖"窗口已经就位 + 跟踪器已能报全屏"，
+		// 所以放在最后。默认两个都是关的 → 行为与阶段三完全一致。
+		applyAutoHideConfig();
+		// ⚠ 先自愈再注册：把上次强杀可能留下的工作区占用清掉（红线 7）。
+		//   顺序不能反 —— 否则我们会基于一个"被污染的工作区"去算位置，
+		//   而且新注册会与残留叠加（实测工作区会被吃掉两份）。
+		//
+		// ⚠⚠ 自愈做了两件事（顺序不能变）：
+		//   1) 用状态文件里备份的值把工作区 `SPI_SETWORKAREA` 写回干净值；
+		//   2) 跑一次 `purgeStaleRecord()`，把 shell 里那条死 AppBar 记录扫掉
+		//      —— 光改数值不够，死记录会让接下来的注册算成"残留 + 新"，
+		//      工作区被占两道（实测干净底 1440 → 1257，占 183px 而不是 95px）。
+		//   两步都在 recoverStaleWorkArea 里完成了，之后照常注册即可，功能不降级。
+		const bool staleFound =
+			AppBarReserve::recoverStaleWorkArea([](const std::wstring& s) { log(s); }, appBarStatePath());
+		if (staleFound) log(L"[appbar] 上次强杀残留已清理，本次正常注册");
+		syncAppBar();
 	}
 
 	void DockWin::onCreated()
@@ -272,10 +312,20 @@ namespace zdock {
 		// ⚠ WindowFromPoint 会忽略被 region 挖掉的像素，正好符合我们的定义：
 		//   halo 那圈透明区不算"在 dock 上"。
 		HWND under = WindowFromPoint(pt);
-		if (under == hwnd) {
+		const bool overDock = (under == hwnd);
+		if (overDock) {
 			POINT client = pt;
 			ScreenToClient(hwnd, &client);
 			idx = indexAtHover(client);
+		}
+
+		// 阶段四：自动隐藏的"离开"判定就挂在这里。
+		// ⚠ 这里是**事件驱动 + 单次查询**（由 WM_NCHITTEST / 定时器兜底触发），
+		//   不是轮询：我们只是借"系统刚好在问命中"这个时机顺便看了一眼光标。
+		//   任务书红线 4 的例外条款明确允许"自动隐藏延迟这类自身 UI 状态"。 
+		if (cfgAutoHide && slideState != SlideState::Hidden) {
+			if (overDock || menuSessions > 0) keepVisible();
+			else scheduleHide();
 		}
 
 		if (idx == hoverIndex) return false;
@@ -379,6 +429,8 @@ namespace zdock {
 		hoverIndex = -1;
 		applyHover(-1);
 		ensureHoverTimer(false);
+		// 启动完鼠标多半已经移走了（比如新窗口占了前台）→ 走延迟隐藏那条路
+		scheduleHide();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -399,6 +451,16 @@ namespace zdock {
 	{
 		if (!menu || !hwnd) return 0;
 
+		// 菜单开着期间绝不自动隐藏（任务书 §5：无悬停 / 拖放 / **菜单会话**）。
+		// 菜单是模态的，TrackPopupMenuEx 会阻塞在这里，所以必须用计数而不是"回来再置 false"
+		// ——期间可能被别的路径重新进入。
+		++menuSessions;
+		// 顺手取消待执行的滑出（不然 500ms 后菜单还开着、dock 却滑走了）
+		if (hideDelayTimerOn) {
+			killTimer(kTimerAutoHide);
+			hideDelayTimerOn = false;
+		}
+
 		// WS_EX_NOACTIVATE 的窗口拿不到前台权，先临时允许激活一下。
 		// 只改这一个窗口，不做 AttachThreadInput（那会把自己的输入队列
 		// 挂到别的线程上，出问题很难查）。
@@ -414,6 +476,10 @@ namespace zdock {
 		// 还原 NOACTIVATE：点图标启动程序时不该把 dock 变成活动窗口
 		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
 		DestroyMenu(menu);
+
+		if (menuSessions > 0) --menuSessions;
+		// 菜单关了 → 重新按"鼠标现在在不在"决定隐藏
+		scheduleHide();
 		return cmd;
 	}
 
@@ -426,7 +492,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.2 · 配置持久化");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.4 · 自动隐藏 / 工作区预留");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -561,6 +627,7 @@ namespace zdock {
 		hoverIndex = -1;
 		applyHover(-1);
 		ensureHoverTimer(false);
+		scheduleHide();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -613,13 +680,7 @@ namespace zdock {
 		const float winW = panelW() + 2 * kSideSlack;
 		const float winH = kHaloH + panelH();
 		setSize(winW, winH);
-
-		RECT work{};
-		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-		const int panelWpx = static_cast<int>(px(panelW()));
-		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
-		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
-		setPosition(panelLeft - static_cast<int>(px(kSideSlack)), panelBottom - static_cast<int>(h));
+		applyDockPlacement(0);
 
 		onCreated();
 
@@ -643,6 +704,10 @@ namespace zdock {
 	{
 		Config::get()->load();
 		rebuild();
+		// 阶段四：自动隐藏开关 / 热区 / 工作区预留都要跟着新配置重来一遍
+		// ⚠ 顺序：先 applyAutoHideConfig（可能把窗口摆回展开态），再 syncAppBar。
+		applyAutoHideConfig();
+		syncAppBar();
 	}
 
 	// ===========================================================================
@@ -671,10 +736,11 @@ namespace zdock {
 			}
 			};
 
-		// 全屏变化 → 阶段四会用来让位；阶段三先只记日志
-		tracker.onFullscreenChanged = [](bool on) {
-			log(std::format(L"[dock] 全屏应用 {}", on ? L"进入" : L"退出"));
-			};
+		// 全屏变化 → 阶段四：让位（隐藏）/ 恢复
+		tracker.onFullscreenChanged = [this](bool on) { onFullscreenChanged(on); };
+
+		// explorer 重启自愈（任务书 §2 #32）
+		tracker.onTaskbarCreated = [this] { onTaskbarCreated(); };
 
 		if (!tracker.start()) {
 			log(L"[dock] 窗口跟踪器启动失败，运行指示 / 临时图标不可用");
@@ -858,16 +924,8 @@ namespace zdock {
 
 		// 窗口尺寸变化的**同时**要把位置摆回"水平居中、贴底"，
 		// 否则窗口会以左下角为锚、越来越靠右。
-		RECT work{};
-		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-		const float oldH = h;   // setSize 会改 h
 		setSize(winW, winH);
-		const int panelWpx = static_cast<int>(px(panelW()));
-		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
-		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
-		(void)oldH;
-		setPosition(panelLeft - static_cast<int>(px(kSideSlack)),
-			panelBottom - static_cast<int>(h));
+		applyDockPlacement(0);
 
 		layout();
 		updateHitRegion();
@@ -969,6 +1027,7 @@ namespace zdock {
 		hoverIndex = -1;
 		applyHover(-1);
 		ensureHoverTimer(false);
+		scheduleHide();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1081,6 +1140,411 @@ namespace zdock {
 	{
 		if (!hwnd || !IsWindow(hwnd)) return;
 		PostMessageW(hwnd, WM_CLOSE, 0, 0);
+	}
+
+	// ===========================================================================
+	// 阶段四：窗口定位 / 自动隐藏 / 全屏让位 / 工作区预留
+	// ===========================================================================
+
+	// ---------------------------------------------------------------------------
+	// dock 所在监视器的**完整矩形**（rcMonitor，物理像素）。
+	// ⚠ 定位 dock 一律以它为基准，不要用 SPI_GETWORKAREA —— 工作区会被
+	//   AppBar 预留改掉，拿它当基准等于自引用（见 dockRectShown 的注释）。
+	// ---------------------------------------------------------------------------
+	RECT DockWin::monitorRect() const
+	{
+		HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi{};
+		mi.cbSize = sizeof(mi);
+		if (mon && GetMonitorInfoW(mon, &mi)) return mi.rcMonitor;
+		// 兜底：主监视器
+		return RECT{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+	}
+
+	// ---------------------------------------------------------------------------
+	// dock 面板在屏幕上的目标矩形（**展开态**，物理像素）。
+	// 与阶段一以来的算法一致：底边 = 屏幕底边 − bottomMargin，水平居中于屏幕。
+	//
+	// ⚠⚠ 基准必须是**监视器的 rcMonitor**，不能用 SPI_GETWORKAREA。
+	//   踩过的坑（实测）：AppBar 预留会缩进"工作区"，而工作区正是我们用来
+	//   定位 dock 的东西 —— 这就是个**自引用反馈回路**。工作区被抬一次，
+	//   下一次算出来的 dock 位置就跟着上爬一次，于是每注册一次就多占一层：
+	//   实测干净工作区底 1440，一次注册后变 1257（爬了 183px = 两层 95px）。
+	//   改成锚 rcMonitor 后，dock 位置恒定，AppBar 只负责把工作区让出 95px。
+	// ---------------------------------------------------------------------------
+	RECT DockWin::dockRectShown() const
+	{
+		RECT work = monitorRect();   // rcMonitor：不随 AppBar 预留变化
+
+		const int panelWpx = static_cast<int>(px(panelW()));
+		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
+		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
+
+		// 窗口矩形比面板大（四周是透明 halo / slack），所以窗口左上角要往外让。
+		RECT r{};
+		r.left = panelLeft - static_cast<int>(px(kSideSlack));
+		r.top = panelBottom - static_cast<int>(h);
+		r.right = r.left + static_cast<LONG>(w);
+		r.bottom = r.top + static_cast<LONG>(h);
+		return r;
+	}
+
+	// ---------------------------------------------------------------------------
+	// 把窗口摆到"展开态 + offsetY 的垂直偏移"。
+	// offsetY 单位 = 物理像素，正数 = 往下（屏幕外方向在顶部，这里是往上滑所以用负数？——）
+	// ⚠ 本 dock 贴**底边**，滑出方向是**往下**：offsetY 为正 = 往下 = 往屏幕外。
+	//   面板高度加一点余量作为总位移，滑完之后整个窗口都在屏幕外。
+	// ---------------------------------------------------------------------------
+	void DockWin::applyDockPlacement(int offsetY)
+	{
+		const RECT r = dockRectShown();
+		shownOrigin.x = r.left;
+		shownOrigin.y = r.top;
+		setPosition(r.left, r.top + offsetY);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 从配置刷新自动隐藏缓存 + 按需创建 / 销毁热区窗口。
+	// ---------------------------------------------------------------------------
+	void DockWin::applyAutoHideConfig()
+	{
+		hotZone.onEnter = [this] {
+			// 热区被碰到 → 立刻滑入（并取消任何待执行的滑出）
+			keepVisible();
+			slideIn();
+			};
+		// 自动化测试注入：探针用 PostMessage 直接把"全屏状态"喂进来，
+		// 免得为了造一个真全屏前台窗口去 SetForegroundWindow（那会抢用户焦点）。
+		hotZone.onTestInject = [this](bool on) { onFullscreenChanged(on); };
+		hotZone.onLog = [](const std::wstring& s) { log(s); };
+
+		if (cfgAutoHide) {
+			const RECT hz = hotZoneRect();
+			if (!hotZone.alive()) hotZone.create(hz);
+			else hotZone.moveTo(hz);
+			log(std::format(L"[dock] 自动隐藏已启用（延迟 {}ms / 滑入 {}ms / 滑出 {}ms / 全屏让位 {}）",
+				cfgHideDelayMs, cfgSlideInMs, cfgSlideOutMs, cfgHideOnFullscreen ? 1 : 0));
+		}
+		else {
+			// 关掉自动隐藏要立刻回到展开态并销毁热区 ——
+			// 不销毁的话屏幕边上会留一条看不见却吃点击的窗口。
+			hotZone.destroy();
+			if (slideState != SlideState::Shown) {
+				slideState = SlideState::Shown;
+				slideT = 0.f;
+				applyDockPlacement(0);
+				log(L"[dock] 自动隐藏关闭，回到展开态");
+			}
+			log(L"[dock] 自动隐藏未启用");
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 热区窗口该在的屏幕矩形（物理像素）。
+	// 任务书 §4：贴停靠边的**3px 厚**细窗，宽取 `max(dock 宽, 屏宽/2)`，居中。
+	// ---------------------------------------------------------------------------
+	RECT DockWin::hotZoneRect() const
+	{
+		// ⚠ 同样锚监视器，不锚工作区 —— 否则热区会跟着 AppBar 预留一起上爬，
+		//   越爬越高，最后鼠标够不到。
+		RECT work = monitorRect();
+
+		const int screenW = work.right - work.left;
+		const int panelWpx = static_cast<int>(px(panelW()));
+		const int wantW = std::max(panelWpx, screenW / 2);
+
+		const int thick = 3;   // 物理像素，任务书 §4 定 3px
+		const int cx = work.left + screenW / 2;
+
+		RECT r{};
+		r.left = cx - wantW / 2;
+		r.right = r.left + wantW;
+		// 贴屏幕底边（不是工作区底边）—— 热区是碰鼠标用的，
+		// 必须待在"用户以为 dock 该出现的那条边"上。
+		r.bottom = work.bottom;
+		r.top = r.bottom - thick;
+		return r;
+	}
+
+	void DockWin::syncHotZone()
+	{
+		if (cfgAutoHide) {
+			const RECT hz = hotZoneRect();
+			if (!hotZone.alive()) hotZone.create(hz);
+			else hotZone.moveTo(hz);
+		}
+		else {
+			hotZone.destroy();
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 当前是否"该隐藏"：自动隐藏开着，且（全屏应用在前台 且 开了全屏让位）。
+	// ⚠ 这里**不含**"鼠标在不在面板上"的判定 —— 那由 keepVisible / 延迟管，
+	//   否则鼠标一离开就会立刻隐藏，任务书 §5 要的是"约 500ms 后"。
+	// ---------------------------------------------------------------------------
+	bool DockWin::shouldHideNow() const
+	{
+		if (!cfgAutoHide) return false;
+		if (cfgHideOnFullscreen && fullscreenNow) return true;
+		return false;
+	}
+
+	// ---------------------------------------------------------------------------
+	// 鼠标此刻是否压在 dock 面板上。
+	// ⚠ 只在"滑入动画刚结束"这类离散时刻调，**不做轮询**（红线 4）。
+	//   用 WindowFromPoint 而不是 GetCursorPos+自算矩形：
+	//   它会考虑窗口 region（我们做过 halo 穿透），比几何判定更准。
+	// ---------------------------------------------------------------------------
+	bool DockWin::cursorOverDock() const
+	{
+		if (!hwnd) return false;
+		POINT pt{};
+		if (!GetCursorPos(&pt)) return false;
+		HWND under = WindowFromPoint(pt);
+		return under == hwnd;
+	}
+
+	// ---------------------------------------------------------------------------
+	// 记一次"用户还在用 dock"：取消待执行的滑出 + 若已隐藏则滑入。
+	// ---------------------------------------------------------------------------
+	void DockWin::keepVisible()
+	{
+		if (hideDelayTimerOn) {
+			killTimer(kTimerAutoHide);
+			hideDelayTimerOn = false;
+		}
+		if (slideState != SlideState::Shown && !shouldHideNow()) slideIn();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 鼠标离开面板：启动延迟滑出（500ms）。到期后 onTimer 再确认一次。
+	// ⚠ 这是红线 4 明确豁免的"自身 UI 状态短定时器"，不是轮询外部状态。
+	// ---------------------------------------------------------------------------
+	void DockWin::scheduleHide()
+	{
+		if (!cfgAutoHide) return;
+		if (menuSessions > 0) return;             // 菜单开着绝不隐藏
+		if (shouldHideNow()) { slideOut(); return; }   // 全屏应用在前台：立刻让位
+		if (hideDelayTimerOn) return;
+		hideDelayTimerOn = true;
+		setTimer(cfgHideDelayMs, kTimerAutoHide);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 滑入（展开）。时长 cfgSlideInMs（默认 200ms）。
+	// ---------------------------------------------------------------------------
+	void DockWin::slideIn()
+	{
+		if (!cfgAutoHide || !hwnd) return;
+		// ⚠ 全屏应用在前台时**保持隐藏**（任务书 §3："全屏应用前台 → 保持隐藏"）。
+		//   热区碰一下也要拦住 —— 否则全屏游戏/视频时鼠标扫过屏幕底边，
+		//   dock 会从全屏画面底下拱出来。
+		if (shouldHideNow()) return;
+		if (slideState == SlideState::Shown && slideT <= 0.f) return;
+
+		// 从当前实际位置开始补间（避免滑动中途反向时跳变）
+		RECT cur{};
+		GetWindowRect(hwnd, &cur);
+		slideFrom = static_cast<float>(cur.top - shownOrigin.y);
+		slideTo = 0.f;
+		slideT = slideFrom;
+		slideDurMs = cfgSlideInMs;
+		slideStartTick = GetTickCount64();
+		slideState = SlideState::Sliding;
+		if (!slideTimerOn) { slideTimerOn = true; setTimer(16, kTimerSlide); }
+		log(std::format(L"[dock] 滑入开始（{:.0f}px / {}ms）", slideFrom, slideDurMs));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 滑出（隐藏）。时长 cfgSlideOutMs（默认 300ms，ease-out）。
+	// ⚠ 滑出的位移 = 面板高度 + halo 余量，保证整个窗口（含上方 halo）都在屏幕外。
+	//   用窗口的高 h 而不是面板高：halo 那圈虽然透明，但它是窗口的一部分。
+	// ---------------------------------------------------------------------------
+	void DockWin::slideOut()
+	{
+		if (!cfgAutoHide || !hwnd) return;
+		if (slideState == SlideState::Hidden && slideT >= 1.f) return;
+
+		RECT cur{};
+		GetWindowRect(hwnd, &cur);
+		slideFrom = static_cast<float>(cur.top - shownOrigin.y);
+		// 目标：整个窗口滑到屏幕底边之外（同样锚监视器，不受工作区影响）
+		const RECT mon = monitorRect();
+		const float full = static_cast<float>(mon.bottom - shownOrigin.y);
+		slideTo = full;
+		slideT = (slideTo > 0.f) ? (slideFrom / slideTo) : 1.f;
+		slideDurMs = cfgSlideOutMs;
+		slideStartTick = GetTickCount64();
+		slideState = SlideState::Sliding;
+		if (!slideTimerOn) { slideTimerOn = true; setTimer(16, kTimerSlide); }
+		log(std::format(L"[dock] 滑出开始（{:.0f} → {:.0f}px / {}ms）", slideFrom, slideTo, slideDurMs));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 滑动补间。16ms 一帧（约 60fps）。
+	//
+	// ⚠ 用**定时器补间 + SetWindowPos**，不用 Composition 动画：
+	//   Composition 动的是节点，动不了窗口在屏幕上的位置。而"滑出屏幕"必须动窗口。
+	//   这是任务书 §3 允许的实现 —— 它只约束时长与缓动（200/300ms ease-out）。
+	// ---------------------------------------------------------------------------
+	void DockWin::tickSlide()
+	{
+		if (!hwnd || slideState != SlideState::Sliding) {
+			if (slideTimerOn) { killTimer(kTimerSlide); slideTimerOn = false; }
+			return;
+		}
+
+		// ease-out cubic：1-(1-t)^3
+		float lin = (slideDurMs > 0)
+			? static_cast<float>(GetTickCount64() - slideStartTick) / static_cast<float>(slideDurMs)
+			: 1.f;
+		if (lin > 1.f) lin = 1.f;
+		const float e = 1.f - std::pow(1.f - lin, 3.f);
+
+		const float dist = slideFrom + (slideTo - slideFrom) * e;
+		setPosition(shownOrigin.x, shownOrigin.y + static_cast<int>(std::lround(dist)));
+
+		if (lin >= 1.f) {
+			killTimer(kTimerSlide);
+			slideTimerOn = false;
+			slideT = (slideTo > 0.f) ? 1.f : 0.f;
+			slideState = (slideTo > 0.f && std::abs(slideTo) > 1.f) ? SlideState::Hidden : SlideState::Shown;
+			log(std::format(L"[dock] 滑动结束 -> {}", slideState == SlideState::Hidden ? L"隐藏" : L"展开"));
+			// ⚠ 滑入结束后必须补一次"该不该收"的判断。
+			//   触发滑入的来源不一定伴随鼠标在 dock 上（典型：全屏应用退出时
+			//   无条件 slideIn）。不补这一下，dock 会一直停着不走，直到下次
+			//   鼠标扫过才收 —— 实测这个漏判会留下一个"赖着不走的 dock"。
+			if (slideState == SlideState::Shown) {
+				if (shouldHideNow()) slideOut();
+				else if (!cursorOverDock()) scheduleHide();
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 全屏应用进入 / 退出（跟踪器事件驱动）。
+	//  进入 → 若开了让位，立刻滑出（不等 500ms 延迟）
+	//  退出 → 滑入，并把鼠标还给用户（不抢焦点，只是把 dock 放回来）
+	// ---------------------------------------------------------------------------
+	void DockWin::onFullscreenChanged(bool on)
+	{
+		fullscreenNow = on;
+		log(std::format(L"[dock] 全屏应用 {}", on ? L"进入" : L"退出"));
+		if (!cfgAutoHide) return;
+
+		// ⚠ 热区**不销毁**。理由：
+		//   1) 它已经全透明、不抢焦点、不进 Alt+Tab，全屏应用看不出来；
+		//   2) 真按了它也没用 —— slideIn() / keepVisible() 都被
+		//      shouldHideNow() 挡住，全屏期间 dock 不会拱出来；
+		//   3) 留着它，自动化测试才有稳定的注入通道
+		//      （销毁了 hwnd 就失效，探针没法再驱动状态机）。
+		//   早期版本在全屏时销毁热区，实测发现会让探针的注入通道断掉。
+		if (on) {
+			if (cfgHideOnFullscreen) slideOut();
+		}
+		else {
+			// 全屏退出：把 dock 放回来。但**不抢鼠标**——如果用户鼠标不在
+			// dock 上，滑入结束后 tickSlide 会补一次 scheduleHide 把它收回去。
+			slideIn();
+		}
+	}
+
+	// ===========================================================================
+	// 工作区预留（AppBar）
+	// ===========================================================================
+
+	// ---------------------------------------------------------------------------
+	// 工作区预留（AppBar）
+	// ---------------------------------------------------------------------------
+
+	/// 强杀自愈用的状态文件路径（exe 同目录）。
+	std::wstring DockWin::appBarStatePath() const
+	{
+		wchar_t buf[MAX_PATH * 2]{};
+		GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
+		std::filesystem::path p{ buf };
+		return (p.parent_path() / L"zdock-appbar.state").wstring();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 按配置注册 / 注销 AppBar。
+	// ⚠ 只在状态**变化**时才动系统：每次重建都 ABM_NEW/ABM_REMOVE 会让
+	//   所有窗口的工作区反复抖动（用户能看到任务栏/窗口闪）。
+	// ---------------------------------------------------------------------------
+	bool DockWin::syncAppBar()
+	{
+		if (!hwnd) return false;
+
+		appBar.onLog = [](const std::wstring& s) { log(s); };
+		appBar.onWorkAreaChanged = [this] {
+			// 系统改了停靠空间 → 重算 dock 位置（同时把热区跟过去）
+			applyDockPlacement(slideState == SlideState::Hidden ? static_cast<int>(h) : 0);
+			syncHotZone();
+			};
+
+		// 请求的矩形：只留面板那一块（不含 halo / slack），否则会向系统多要空间
+		auto desiredPanelRect = [this] {
+			RECT r = dockRectShown();
+			r.left += static_cast<LONG>(px(kSideSlack));
+			r.right -= static_cast<LONG>(px(kSideSlack));
+			r.top = r.bottom - static_cast<LONG>(px(panelH()));
+			return r;
+			};
+
+		if (cfgReserveWorkArea) {
+			// 已经注册过：重报一次位置即可（register_ 内部会先注销再注册，
+			// 这对 AppBar 是标准做法 —— 改位置就必须走 NEW/SETPOS 这套）。
+			appBar.register_(hwnd, desiredPanelRect(), appBarStatePath(), ABE_BOTTOM);
+			// ⚠ 注册之后工作区变了，得重新摆一次窗口位置（否则 dock 会还停在旧工作区上）
+			applyDockPlacement(slideState == SlideState::Hidden ? static_cast<int>(h) : 0);
+			syncHotZone();
+			return appBar.registered();
+		}
+
+		if (appBar.registered()) {
+			appBar.unregister_();
+			// 注销后工作区恢复，窗口位置也要跟着回
+			applyDockPlacement(slideState == SlideState::Hidden ? static_cast<int>(h) : 0);
+			syncHotZone();
+		}
+		return false;
+	}
+
+	// ---------------------------------------------------------------------------
+	// explorer 重启自愈（任务书 §2 功能表 #32）。
+	//
+	// explorer 崩了/被重启时，Windows 会广播一条 `TaskbarCreated` 消息
+	// （**注意没有空格**，是 RegisterWindowMessageW(L"TaskbarCreated")）。
+	// 任务栏重建意味着：AppBar 的协调关系没了、shell hook 也可能失效，
+	// 所以这里重新走一遍注册。
+	//
+	// ⚠ 我们不在别人的消息循环里，收不到广播 → 由 main 的窗口过程转进来
+	//   （见 main.cpp / setOnShellBroadcast）。
+	// ---------------------------------------------------------------------------
+	void DockWin::onTaskbarCreated()
+	{
+		log(L"[dock] 收到 TaskbarCreated 广播（explorer 重启），自愈中…");
+
+		// 1) 跟踪器重建（shell hook 的接收窗口还在，但分组表要重扫一遍，
+		//    否则重启前那些窗口的记录会留着）
+		if (tracker.groups().empty() || true) {
+			// 重新注册一次，确保 shell hook 是活的
+			tracker.stop();
+			if (!tracker.start()) {
+				log(L"[dock] 跟踪器重启失败");
+			}
+		}
+		tracker.rebuildAll();
+
+		// 2) AppBar 重新登记（系统的 AppBar 协调表在任务栏重建后是空的）
+		if (appBar.registered()) {
+			appBar.unregister_();
+		}
+		syncAppBar();
+
+		syncWithTracker();
+		log(L"[dock] 自愈完成");
 	}
 
 	LRESULT DockWin::onHitTest(const POINT pos)

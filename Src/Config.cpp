@@ -164,6 +164,33 @@ namespace zdock {
 		bottomMargin = static_cast<float>(obj.GetNamedNumber(L"bottomMargin", bottomMargin));
 		cornerRadius = static_cast<float>(obj.GetNamedNumber(L"cornerRadius", cornerRadius));
 
+		// 布尔字段：GetNamedBoolean 在 JSON 里是数字/字符串时会抛，所以先看类型。
+		// 任务书 §9.6 要求这些开关给用户"看得懂"的兜底，不要因为写了个 "yes" 整份配置作废。
+		auto readBool = [&](const wchar_t* name, bool cur) -> bool {
+			if (!obj.HasKey(name)) return cur;
+			try {
+				const auto v = obj.GetNamedValue(name);
+				if (v.ValueType() == winrt::Windows::Data::Json::JsonValueType::Boolean) {
+					return obj.GetNamedBoolean(name, cur);
+				}
+				if (v.ValueType() == winrt::Windows::Data::Json::JsonValueType::Number) {
+					return obj.GetNamedNumber(name, cur ? 1.0 : 0.0) != 0.0;
+				}
+				log(std::format(L"[config] {} 不是布尔值，用默认 {}", name, cur ? L"true" : L"false"));
+			}
+			catch (const winrt::hresult_error&) {
+				log(std::format(L"[config] {} 读取失败，用默认 {}", name, cur ? L"true" : L"false"));
+			}
+			return cur;
+			};
+		autoHide = readBool(L"autoHide", autoHide);
+		hideOnFullscreen = readBool(L"hideOnFullscreen", hideOnFullscreen);
+		reserveWorkArea = readBool(L"reserveWorkArea", reserveWorkArea);
+
+		autoHideDelayMs = static_cast<int>(obj.GetNamedNumber(L"autoHideDelayMs", autoHideDelayMs));
+		slideInMs = static_cast<int>(obj.GetNamedNumber(L"slideInMs", slideInMs));
+		slideOutMs = static_cast<int>(obj.GetNamedNumber(L"slideOutMs", slideOutMs));
+
 		if (obj.HasKey(L"bgColor")) {
 			const auto s = std::wstring{ obj.GetNamedString(L"bgColor", L"") };
 			if (!s.empty()) {
@@ -218,9 +245,24 @@ namespace zdock {
 			log(std::format(L"[config] animMs = {} 超出 [0, 2000]，回默认 150", animMs));
 			animMs = 150;
 		}
+		// 自动隐藏的三个时长：0 是合法的（=不做动画，直接跳到位），上限 3000ms
+		// 已经够慢；再大就是笔误了。
+		if (autoHideDelayMs < 0 || autoHideDelayMs > 10000) {
+			log(std::format(L"[config] autoHideDelayMs = {} 超出 [0, 10000]，回默认 500", autoHideDelayMs));
+			autoHideDelayMs = 500;
+		}
+		if (slideInMs < 0 || slideInMs > 3000) {
+			log(std::format(L"[config] slideInMs = {} 超出 [0, 3000]，回默认 200", slideInMs));
+			slideInMs = 200;
+		}
+		if (slideOutMs < 0 || slideOutMs > 3000) {
+			log(std::format(L"[config] slideOutMs = {} 超出 [0, 3000]，回默认 300", slideOutMs));
+			slideOutMs = 300;
+		}
 
-		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={}",
-			iconSize, iconGap, hoverScale, animMs, bottomMargin, items.size()));
+		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={} autoHide={} reserve={} hideFull={}",
+			iconSize, iconGap, hoverScale, animMs, bottomMargin, items.size(),
+			autoHide ? 1 : 0, reserveWorkArea ? 1 : 0, hideOnFullscreen ? 1 : 0));
 	}
 
 	std::string Config::toJson() const
@@ -236,6 +278,15 @@ namespace zdock {
 		root.SetNamedValue(L"bottomMargin", JsonValue::CreateNumberValue(bottomMargin));
 		root.SetNamedValue(L"bgColor", JsonValue::CreateStringValue(bgColor));
 		root.SetNamedValue(L"cornerRadius", JsonValue::CreateNumberValue(cornerRadius));
+
+		// 阶段四：自动隐藏 / 工作区预留。默认值都写成"关"，
+		// 即：即便用户没碰这几个字段，行为也和阶段三一模一样。
+		root.SetNamedValue(L"autoHide", JsonValue::CreateBooleanValue(autoHide));
+		root.SetNamedValue(L"autoHideDelayMs", JsonValue::CreateNumberValue(autoHideDelayMs));
+		root.SetNamedValue(L"slideInMs", JsonValue::CreateNumberValue(slideInMs));
+		root.SetNamedValue(L"slideOutMs", JsonValue::CreateNumberValue(slideOutMs));
+		root.SetNamedValue(L"hideOnFullscreen", JsonValue::CreateBooleanValue(hideOnFullscreen));
+		root.SetNamedValue(L"reserveWorkArea", JsonValue::CreateBooleanValue(reserveWorkArea));
 
 		JsonArray arr;
 		for (const auto& it : items) {

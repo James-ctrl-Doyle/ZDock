@@ -184,6 +184,11 @@ namespace zdock {
 			return false;
 		}
 
+		// explorer 重启时 Windows 会广播这条消息。⚠ 名字是 "TaskbarCreated"，
+		// **中间没有空格**（写成 "Taskbar Created" 注册出来是另一个号，永远收不到）。
+		// 我们借自己的接收窗口收它 —— 广播只发顶层窗口，而 Ling 不暴露消息口。
+		taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+
 		msgHwnd = CreateWindowExW(0, kMsgWndClass, L"ZDockTrack", 0,
 			0, 0, 0, 0, nullptr, nullptr, hInst, this);
 		if (!msgHwnd) {
@@ -209,8 +214,9 @@ namespace zdock {
 			nullptr, &WindowTracker::winEventProc, 0, 0,
 			WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-		log(std::format(L"[track] 已启动 shellHookMsg=0x{:04X} hooks={}/{}/{}",
-			shellHookMsg, (bool)hookMinimizeStart, (bool)hookMinimizeEnd, (bool)hookNameChange));
+		log(std::format(L"[track] 已启动 shellHookMsg=0x{:04X} taskbarCreatedMsg=0x{:04X} hooks={}/{}/{}",
+			shellHookMsg, taskbarCreatedMsg,
+			(bool)hookMinimizeStart, (bool)hookMinimizeEnd, (bool)hookNameChange));
 		return true;
 	}
 
@@ -544,6 +550,14 @@ namespace zdock {
 			return DefWindowProcW(hwnd, msg, wp, lp);
 		}
 		if (!self) return DefWindowProcW(hwnd, msg, wp, lp);
+
+		// explorer / 任务栏重建广播（任务书 §2 #32 自愈）。放在 shell hook 判定之前，
+		// 因为它是注册消息号，和 shellHookMsg 不冲突但语义完全不同。
+		if (self->taskbarCreatedMsg && msg == self->taskbarCreatedMsg) {
+			self->log(L"[track] 收到 TaskbarCreated 广播");
+			if (self->onTaskbarCreated) self->onTaskbarCreated();
+			return 0;
+		}
 
 		if (msg == self->shellHookMsg) {
 			// ⚠ 参数语义（容易记反）：

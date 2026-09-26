@@ -453,17 +453,34 @@ def main():
     dpi = u32.GetDpiForWindow(hwnd) / 96.0
     wa = wt.RECT()
     u32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(wa), 0)
+    # ⚠ 定位基准是**监视器 rcMonitor**，不是工作区。
+    #   原因：AppBar 预留会改工作区，拿工作区当基准 = 自引用反馈回路
+    #   （dock 每注册一次就往上爬一层）。见 DockWin::dockRectShown 注释。
+    MONITOR_DEFAULTTONEAREST = 2
+    MI = type('MI', (ctypes.Structure,), {'_fields_': [
+        ('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]})
+    u32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+    u32.MonitorFromWindow.restype = wt.HANDLE
+    u32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.c_void_p]
+    mi = MI(); mi.cbSize = ctypes.sizeof(MI)
+    mon = wt.RECT()
+    _mh = u32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+    if _mh and u32.GetMonitorInfoW(_mh, ctypes.byref(mi)):
+        mon = mi.rcMonitor
+    else:
+        mon = wt.RECT(0, 0, u32.GetSystemMetrics(SM_CXSCREEN), u32.GetSystemMetrics(SM_CYSCREEN))
     l, t, r, b = rect_of(hwnd)
     win_w, win_h = r - l, b - t
     panel_h = int(round((48 + 2 * 8) * dpi))
-    info('屏幕 %dx%d 工作区 %s 窗口 %s dpi=%.2f' %
+    info('屏幕 %dx%d 监视器 %s 工作区 %s 窗口 %s dpi=%.2f' %
          (u32.GetSystemMetrics(SM_CXSCREEN), u32.GetSystemMetrics(SM_CYSCREEN),
+          (mon.left, mon.top, mon.right, mon.bottom),
           (wa.left, wa.top, wa.right, wa.bottom), (l, t, r, b), dpi))
-    check('面板底边贴工作区底边（留 6 逻辑像素）',
-          abs(b - (wa.bottom - round(6 * dpi))) <= 2,
-          '窗口底=%d 期望=%d' % (b, wa.bottom - round(6 * dpi)))
-    check('水平居中', abs((l + r) / 2 - (wa.left + wa.right) / 2) <= 2,
-          '窗口中心=%.0f 工作区中心=%.0f' % ((l + r) / 2, (wa.left + wa.right) / 2))
+    check('面板底边贴屏幕底边（留 6 逻辑像素）',
+          abs(b - (mon.bottom - round(6 * dpi))) <= 2,
+          '窗口底=%d 期望=%d' % (b, mon.bottom - round(6 * dpi)))
+    check('水平居中于屏幕', abs((l + r) / 2 - (mon.left + mon.right) / 2) <= 2,
+          '窗口中心=%.0f 屏幕中心=%.0f' % ((l + r) / 2, (mon.left + mon.right) / 2))
     check('窗口比面板高（给放大留了 halo）', win_h > panel_h,
           'win_h=%d panel_h=%d' % (win_h, panel_h))
 
