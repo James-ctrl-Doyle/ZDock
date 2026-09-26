@@ -1,5 +1,97 @@
 # CHANGELOG
 
+## 0.1.2 · 阶段二（配置持久化）— 2026-09-26
+
+把写死在代码里的那套参数和图标表挪进 `config.json`，并补上图标级菜单（增 / 删 / 打开）。
+
+### 新增：`config.json`（`Src/Config.h/.cpp`）
+
+与 **exe 同目录**的 `config.json`，首次启动自动写出带默认值的文件（用户能看到有哪些可调项）。
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `iconSize` | `48` | 图标基准边长（逻辑像素），闸门 `[16, 256]` |
+| `iconGap` | `12` | 图标间距，闸门 `[0, 128]` |
+| `hoverScale` | `1.7` | 悬停峰值缩放，闸门 `[1, 4]` |
+| `animMs` | `150` | 放大/缩回动画时长（毫秒），闸门 `[0, 2000]` |
+| `bottomMargin` | `6` | 面板距工作区底边（逻辑像素），闸门 `[0, 400]` |
+| `bgColor` | `"#1A1A1ACC"` | 面板背景色，`#RRGGBB` 或 `#RRGGBBAA` |
+| `cornerRadius` | `12` | 面板圆角，闸门 `[0, 128]` |
+| `items` | 系统自带 6 项 | 图标列表，每项 `{path, name?}` |
+
+四条设计约定（与 ZPin 一致，便于两边共享心智）：
+
+1. **文件不存在** → 用默认值并**把默认值写出去**（用户能看到可调项长什么样）
+2. **文件存在但解析失败** → 用默认值，**绝不覆盖**用户文件
+   （手写错一个字符就把整份配置抹掉，代价太大）
+3. **每个字段独立取值 + 独立兜底**：缺字段用默认，坏字段不拖垮整份配置
+4. **保存走"写临时文件 + `MoveFileExW` 原子替换"**，避免写一半断电留下半截 JSON
+
+数值超范围**回默认值而不是 clamp** —— 用户填 9999 明显是笔误，钳到 256 会得到一个
+他没想要又不易察觉的结果。`items` 是**空数组**时保持空（用户故意清空 Dock），
+只有**整个 `items` 键缺失**才回默认表。
+
+`bottomMargin` 就是上一轮拍板的"底部留白改成可配置项"：任务栏设成自动隐藏时调大它，
+可以少抢底部热区。
+
+### 新增：图标级右键菜单
+
+右键**落在图标上** → 该项专属菜单：打开 / 以管理员身份打开 / 从 Dock 移除。
+右键**落在空白处** → 全局菜单：添加程序… / 重新载入配置 / 退出 ZDock。
+
+- 「从 Dock 移除」：先改内存 + 写盘（**写失败整体回退**，不让界面和磁盘不一致），再重建界面
+- 「添加程序…」：`GetOpenFileNameW` 选 exe/lnk，**已在列表里的不重复加**
+- 「重新载入配置」：手改完 `config.json` 不必重启进程
+- 重建走 `body->removeAllChildren()` + 重跑构造那套，项数变化时窗口尺寸/位置一并重算
+
+### 修：Ling 的 `popupMenu` 在窗口内右键**菜单根本不显示**
+
+`App::popupMenu()` 把 owner 传成 `msgHwnd` —— 那是个 `HWND_MESSAGE` 的**消息专用窗口**。
+消息专用窗口没有真实窗口层级，`SetForegroundWindow` 必然失败、`TrackPopupMenuEx`
+找不到可归属的 owner，于是菜单不显示、直接返回 0。
+（托盘场景恰好能用，因为托盘菜单走 shell 那条路。）
+
+ZDock 改用 `DockWin::popupMenuHere()`：owner 用自己的真实 `hwnd`，
+并在弹菜单前**临时摘掉 `WS_EX_NOACTIVATE`** 以便拿到前台权（弹完还原）——
+同一个原因，`GetOpenFileNameW` 也要这么处理，否则对话框可能被压在别的窗口后面，
+用户以为"点了没反应"。不摘这个标志是因为它带 `WS_EX_NOACTIVATE`，前台权拿不到。
+
+### 其他
+
+- `src/Config.cpp` 必须**同时** `#include <winrt/Windows.Foundation.Collections.h>`：
+  `JsonObject::HasKey` / `JsonArray::Size/GetAt/Append` 都是 `IVector`/`IMap` 上的
+  **auto 返回**函数，只引 `Windows.Data.Json.h` 会 C3779「要使用将会返回 auto 的函数，
+  必须首先定义此函数」。
+- 新增探针：`_probe_config.py`（生成/读值/兜底/**不覆盖**，6 项）、
+  `_probe_remove_item.py`（删除/边界/空 Dock，5 项）、
+  `_probe_ui_remove.py`（真实 UI 走一遍右键移除）、`_probe_ui_add.py`（真实 UI 走一遍添加）、
+  `_shot_stage2.py`（验收截图）。**12 项全 PASS**，阶段一 gate 重跑 **24/24**，无回归。
+- 验收图：`build/_review/stage2_default.png`（默认面板）、`stage2_hover.png`（悬停放大）、
+  `stage2_menu.png`（图标菜单）、`stage2_menu_global.png`（全局菜单）。
+
+### 本轮踩到并解决的坑
+
+1. **`Config::load()` 忘了接线**：`Config` 写完了、`DockWin` 也接了 `applyConfig()`，
+   但没人调 `load()` → 启动后 `config.json` 根本不生成。已在 `DockWin::create()` 最前面补上
+   （`applyConfig` / `collectItemsFromConfig` 读的都是 Config 的内存态，载入必须最先）。
+2. **探针不清日志会"假失败"**：`find_line` 取第一条匹配，而日志是追加的 →
+   命中的是**上一轮**留下的旧行。`_probe_config.py` 第一版 6 项里错了 3 项，
+   全是这个原因。修法：每轮开跑前删日志 + `find_line` 取**最后一条**匹配。
+3. **模拟右键不移动光标 → 菜单弹错位置**：菜单弹出点来自 `GetCursorPos()`，
+   只 `PostMessage(WM_RBUTTONUP)` 而不真的 `SetCursorPos`，菜单会弹在光标残留处
+   （实测跑到 `(506,902)`）。`_probe_ui_add.py` 踩到。
+4. **`PostMessage` 的 lParam 必须是 client 坐标**：Ling 的 `winProc` 用
+   `GET_X_LPARAM(lParam)` 直接当客户区坐标，传屏幕坐标会算出窗口外的点 → 命中不到图标。
+5. **模态菜单/对话框只能靠物理鼠标点**：`TrackPopupMenuEx` 有自己的模态消息循环，
+   `keybd_event` 在 `WS_EX_NOACTIVATE` 窗口线程上不可靠（焦点拿不到）。
+   改成 `SetCursorPos` + `mouse_event` 点菜单项坐标，或者直接 `FindWindowExW` 找控件 +
+   `SendMessage(WM_SETTEXT / BM_CLICK)`。
+   ⚠ **代价**：物理输入会波及用户当前的活动窗口（会把 WorkBuddy 的对话抢掉焦点）。
+   取证优先用 `PostMessage` / `SendMessage`，**非必要不模拟物理输入**。
+6. **菜单截图不能用 `PrintWindow`**（系统 `#32768` 窗口拍不出来），
+   只能 `BitBlt` **菜单自身那一小块矩形**（实测约 214×108 像素）——
+   绝不整屏 BitBlt，那会把用户的浏览器内容一起拍进去。
+
 ## 0.1.1 — 2026-09-26
 
 修两个实测复现的 bug。都是**根因级**修复，不是绕过现象。

@@ -43,6 +43,7 @@ CL_FLAGS=(
 
 SRCS=(
     "$ROOT/Src/Log.cpp"
+    "$ROOT/Src/Config.cpp"
     "$ROOT/Src/SingleInstance.cpp"
     "$ROOT/Src/IconLoader.cpp"
     "$ROOT/Src/IconNode.cpp"

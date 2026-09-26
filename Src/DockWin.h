@@ -36,25 +36,35 @@ namespace zdock {
 
 	private:
 		// ---- 布局常量：逻辑像素（物理值由 Ling 的 setter 乘 dpi）----
-		static constexpr float kIconBase = 48.f;    // 图标基准边长
-		static constexpr float kIconGap = 12.f;     // 图标间距（≈25%）
+		// 带 kCfg 前缀的几个来自 config.json，在构造时缓存成成员；
+		// 其余是纯内部结构参数，不对外暴露。
 		static constexpr float kPadX = 14.f;        // 面板左右内边距
 		static constexpr float kPadY = 8.f;         // 面板上下内边距
 		static constexpr float kHaloH = 72.f;       // 面板上方给放大/标签留的透明区
 		static constexpr float kSideSlack = 48.f;   // 面板左右各留的透明区
-		static constexpr float kBottomMargin = 6.f; // 距工作区底边
-		static constexpr float kHoverPeak = 1.7f;   // 悬停峰值缩放
 		static constexpr float kHoverSigma = 1.0f;  // 鱼眼衰减（以图标位距为单位）
-		static constexpr int   kAnimMs = 150;
-		static constexpr int   kTimerHover = 1;     // 判定"鼠标已移出"的短定时器
+		static constexpr int   kTimerHover = 1;     // 判定"鼠标已移出"的兜底定时器
 		static constexpr int   kMenuExit = 101;
+		static constexpr int   kMenuOpen = 102;
+		static constexpr int   kMenuOpenAdmin = 103;
+		static constexpr int   kMenuRemove = 104;
+		static constexpr int   kMenuReload = 105;
+		static constexpr int   kMenuAdd = 106;
 		// 悬停定时器周期。它现在唯一的职责是"兜底察觉鼠标走了"（见
 		// refreshHoverFromCursor）：鼠标移出窗口未必会给我们消息
 		// （比如移向另一个进程的窗口、或者被 region 挖掉的那块隙缝），
 		// 所以留一个低频核对。100ms 是"离开到缩回"体感的上限。
 
-		void collectDefaultItems();
-		void buildContent();
+		// ---- 来自 config.json 的缓存（逻辑像素 / 其余原样）----
+		float cfgIconBase{ 48.f };     // 图标基准边长
+		float cfgIconGap{ 12.f };      // 图标间距
+		float cfgHoverPeak{ 1.7f };    // 悬停峰值缩放
+		int   cfgAnimMs{ 150 };        // 动画时长
+
+		/// <summary>把 config 的值搬进上面那组缓存。create() 最开始调一次。</summary>
+		void applyConfig();
+
+		void collectItemsFromConfig();
 		void loadIcons();
 
 		int  indexAtHover(POINT pt) const;   // 未缩放命中带（含横向容差）
@@ -74,7 +84,23 @@ namespace zdock {
 		void ensureHoverTimer(bool want);
 		void updateHitRegion();
 		void launch(int index);
+		/// <summary>以管理员身份启动（ShellExecuteW "runas"，会弹 UAC）。</summary>
+		void launchAdmin(int index);
 		void showContextMenu();
+		void showItemContextMenu(int index);
+		/// <summary>
+		/// 在自己窗口内弹菜单（owner = dock 的 hwnd，不是 Ling 的 message-only 窗口）。
+		/// 会临时摘掉 WS_EX_NOACTIVATE 以便拿到前台权。返回选中的命令 id，取消返回 0。
+		/// </summary>
+		UINT popupMenuHere(HMENU menu, POINT screenPt);
+		/// <summary>把某项从 Dock 移除并落盘 config.json，然后重建界面。</summary>
+		void removeItem(int index);
+		/// <summary>弹文件选择框挑一个 exe/lnk/文件夹加到 Dock 末尾，并落盘。取消则什么都不做。</summary>
+		void addItem();
+		/// <summary>按 Config 的最新内容重建整个界面（销毁并重造所有子节点）。</summary>
+		void rebuild();
+		/// <summary>重新读 config.json 后重建（用户手改配置不必重启进程）。</summary>
+		void reloadConfig();
 
 		float px(float logical) const { return logical * dpi; }
 		float panelW() const;

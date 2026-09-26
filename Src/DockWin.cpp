@@ -1,4 +1,5 @@
 #include "DockWin.h"
+#include "Config.h"
 #include "IconLoader.h"
 #include "Log.h"
 #include <include/App.h>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <shellapi.h>
+#include <commdlg.h>   // GetOpenFileNameW（"添加程序"的文件选择框）
 #include <format>
 
 namespace zdock {
@@ -18,16 +20,16 @@ namespace zdock {
 	{
 		const float n = static_cast<float>(items.size());
 		if (n <= 0) return 2 * kPadX;
-		return n * kIconBase + (n - 1) * kIconGap + 2 * kPadX;
+		return n * cfgIconBase + (n - 1) * cfgIconGap + 2 * kPadX;
 	}
 
-	float DockWin::panelH() const { return kIconBase + 2 * kPadY; }
+	float DockWin::panelH() const { return cfgIconBase + 2 * kPadY; }
 
 	float DockWin::iconsW() const
 	{
 		const float n = static_cast<float>(items.size());
 		if (n <= 0) return 0.f;
-		return n * kIconBase + (n - 1) * kIconGap;
+		return n * cfgIconBase + (n - 1) * cfgIconGap;
 	}
 
 	bool DockWin::inRect(POINT pt, float x, float y, float w, float h)
@@ -36,40 +38,40 @@ namespace zdock {
 	}
 
 	// ---------------------------------------------------------------------------
-	// 阶段一：图标列表先写死在候选表里（取存在的前 6 个）。
-	// 持久化配置在阶段二接上 —— 那时这份表就是"首次启动的默认值"。
+	// 把 config.json 的值搬进缓存成员。create() 最开始调一次。
+	// 热改配置需要重启进程 —— 阶段二先这样，做设置界面时再谈动态生效。
 	// ---------------------------------------------------------------------------
-	void DockWin::collectDefaultItems()
+	void DockWin::applyConfig()
 	{
-		wchar_t winDir[MAX_PATH]{};
-		if (!GetWindowsDirectoryW(winDir, MAX_PATH)) return;
-		const std::wstring root{ winDir };
+		auto* cfg = Config::get();
+		cfgIconBase = cfg->iconSize;
+		cfgIconGap = cfg->iconGap;
+		cfgHoverPeak = cfg->hoverScale;
+		cfgAnimMs = cfg->animMs;
+	}
 
-		const std::wstring candidates[] = {
-			root + L"\\explorer.exe",
-			root + L"\\System32\\notepad.exe",
-			root + L"\\System32\\mspaint.exe",
-			root + L"\\System32\\cmd.exe",
-			root + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-			root + L"\\System32\\SnippingTool.exe",
-			root + L"\\System32\\calc.exe",
-			root + L"\\System32\\regedit.exe",
-		};
-
-		for (const auto& path : candidates) {
-			if (items.size() >= 6) break;
-			if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+	// ---------------------------------------------------------------------------
+	// 图标列表来自 config.json（首次启动时 Config 会写入内置默认表）。
+	// ---------------------------------------------------------------------------
+	void DockWin::collectItemsFromConfig()
+	{
+		auto* cfg = Config::get();
+		for (const auto& ci : cfg->items) {
 			DockItem item;
-			item.path = path;
-			item.name = displayNameOf(path);
+			item.path = ci.path;
+			item.name = ci.name.empty() ? displayNameOf(ci.path) : ci.name;
 			items.push_back(std::move(item));
 		}
+		log(std::format(L"[dock] 配置里 {} 项，生效 {} 项", cfg->items.size(), items.size()));
 	}
 
 	void DockWin::create()
 	{
-		collectDefaultItems();
-		log(std::format(L"[dock] 候选图标命中 {} 个", items.size()));
+		// 配置必须最先载入：applyConfig / collectItemsFromConfig 都读 Config 的内存态。
+		// 文件不存在时 load() 会顺手把默认配置写出去，用户能看到有哪些可调项。
+		Config::get()->load();
+		applyConfig();
+		collectItemsFromConfig();
 
 		const float winW = panelW() + 2 * kSideSlack;   // 逻辑
 		const float winH = kHaloH + panelH();
@@ -78,7 +80,8 @@ namespace zdock {
 		RECT work{};
 		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
 		const int panelWpx = static_cast<int>(px(panelW()));
-		const int panelBottom = work.bottom - static_cast<int>(px(kBottomMargin));
+		// 底边留白取自 config：任务栏自动隐藏时调大些可以少抢底部热区
+		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
 		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
 		const int winLeft = panelLeft - static_cast<int>(px(kSideSlack));
 		const int winTop = panelBottom - static_cast<int>(h);
@@ -113,7 +116,12 @@ namespace zdock {
 
 		onMouseUp.add([this](POINT pt, bool right) {
 			if (right) {
-				showContextMenu();
+				// 右键落点先看图标：命中就给**该项专属**菜单，否则给全局菜单。
+				// 用 indexAtVisual 而不是 indexAtHover —— 放大后的那块可见框
+				// 才是用户"看着点在图标上"的范围。
+				const int idx = indexAtVisual(pt);
+				if (idx >= 0) showItemContextMenu(idx);
+				else showContextMenu();
 				return;
 			}
 			const int idx = indexAtVisual(pt);
@@ -139,22 +147,23 @@ namespace zdock {
 		panel->setPosition(Ling::Edge::Left, kSideSlack);
 		panel->setPosition(Ling::Edge::Top, kHaloH);
 		panel->setSize(panelW(), panelH());
-		panel->setBg(Ling::Color(0x1A1A1ACC));
-		panel->setBorderRadius(12.f);
+		// 背景色与圆角都来自 config.json（"#RRGGBBAA" 已在 Config 里校验过格式）
+		panel->setBg(Ling::Color(Config::get()->bgColorValue()));
+		panel->setBorderRadius(Config::get()->cornerRadius);
 		panel->setBorder(1.f, Ling::Color(0xFFFFFF14));
 
 		row = body->makeChild<Ling::Node>();
 		row->setPositionType(Ling::Position::Absolute);
 		row->setPosition(Ling::Edge::Left, kSideSlack + kPadX);
 		row->setPosition(Ling::Edge::Top, kHaloH + kPadY);
-		row->setSize(iconsW(), kIconBase);
+		row->setSize(iconsW(), cfgIconBase);
 		row->setFlexDirection(Ling::FlexDirection::Row);
 		row->setAlignItems(Ling::Align::FlexEnd);
 
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = row->makeChild<IconNode>();
-			node->setSize(kIconBase, kIconBase);
-			if (i + 1 < items.size()) node->setMarginRight(kIconGap);
+			node->setSize(cfgIconBase, cfgIconBase);
+			if (i + 1 < items.size()) node->setMarginRight(cfgIconGap);
 			items[i].node = node;
 		}
 	}
@@ -167,7 +176,7 @@ namespace zdock {
 			return;
 		}
 		// 源位图按**峰值尺寸**取：放大到峰值时 1:1 采样，不会糊。
-		const int targetPx = static_cast<int>(std::lround(px(kIconBase) * kHoverPeak));
+		const int targetPx = static_cast<int>(std::lround(px(cfgIconBase) * cfgHoverPeak));
 		for (auto& item : items) {
 			if (!item.node) continue;
 			log(std::format(L"[dock] 提取图标：{}（{}）", item.name, item.path));
@@ -180,7 +189,7 @@ namespace zdock {
 
 	int DockWin::indexAtHover(POINT pt) const
 	{
-		const float half = px(kIconGap) * 0.5f;
+		const float half = px(cfgIconGap) * 0.5f;
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = items[i].node;
 			if (!node || node->w <= 0.f) continue;
@@ -262,9 +271,9 @@ namespace zdock {
 			float target = 1.f;
 			if (index >= 0) {
 				const float d = std::abs(static_cast<float>(i) - static_cast<float>(index));
-				target = 1.f + (kHoverPeak - 1.f) * std::exp(-(d / kHoverSigma) * (d / kHoverSigma));
+				target = 1.f + (cfgHoverPeak - 1.f) * std::exp(-(d / kHoverSigma) * (d / kHoverSigma));
 			}
-			node->animateScale(target, kAnimMs);
+			node->animateScale(target, cfgAnimMs);
 		}
 		// 图标一放大就多占一块可见区域，命中区域跟着变
 		updateHitRegion();
@@ -338,17 +347,244 @@ namespace zdock {
 		ensureHoverTimer(false);
 	}
 
+	// ---------------------------------------------------------------------------
+	// 自己在窗口内弹菜单。
+	//
+	// ⚠ 不能用 Ling::App::popupMenu()：它把 owner 传成 msgHwnd —— 那是个
+	//   HWND_MESSAGE 的消息专用窗口。消息专用窗口没有真实窗口层级，
+	//   SetForegroundWindow 必然失败、TrackPopupMenuEx 找不到可归属的 owner，
+	//   于是**菜单根本不显示、直接返回 0**（托盘场景下恰好能用，因为托盘菜单
+	//   是 shell 驱动的另一条路；窗口内右键就不行了）。
+	//
+	// 这里改用 dock 自己的真实窗口当 owner。它带 WS_EX_NOACTIVATE，直接
+	// SetForegroundWindow 也会失败，所以先用 SetWindowPos(HWND_TOPMOST) 把
+	// 前台锁推开再拉——这是 MS KB 135788 那套做法的变体，目的是让菜单能收到
+	// "点了别处"从而正常收起。
+	// ---------------------------------------------------------------------------
+	UINT DockWin::popupMenuHere(HMENU menu, POINT screenPt)
+	{
+		if (!menu || !hwnd) return 0;
+
+		// WS_EX_NOACTIVATE 的窗口拿不到前台权，先临时允许激活一下。
+		// 只改这一个窗口，不做 AttachThreadInput（那会把自己的输入队列
+		// 挂到别的线程上，出问题很难查）。
+		const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+		SetForegroundWindow(hwnd);
+
+		const UINT cmd = TrackPopupMenuEx(
+			menu,
+			TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+			screenPt.x, screenPt.y, hwnd, nullptr);
+
+		// 还原 NOACTIVATE：点图标启动程序时不该把 dock 变成活动窗口
+		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+		DestroyMenu(menu);
+		return cmd;
+	}
+
 	void DockWin::showContextMenu()
 	{
 		HMENU menu = CreatePopupMenu();
 		if (!menu) return;
+		AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加程序…");
+		AppendMenuW(menu, MF_STRING, kMenuReload, L"重新载入配置");
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.0 · 阶段一");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.2 · 配置持久化");
 
-		// App::popupMenu 内部 TrackPopupMenuEx(TPM_RETURNCMD) 并负责 DestroyMenu
-		const UINT cmd = Ling::App::get()->popupMenu(menu);
-		if (cmd == kMenuExit) Ling::App::get()->quit(0);
+		POINT pt{};
+		GetCursorPos(&pt);
+		const UINT cmd = popupMenuHere(menu, pt);
+		switch (cmd) {
+		case kMenuExit:   Ling::App::get()->quit(0); break;
+		case kMenuReload: reloadConfig();            break;
+		case kMenuAdd:    addItem();                 break;
+		default: break;
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 添加一项到 Dock 末尾。
+	//
+	// ⚠ 用 GetOpenFileNameW（comdlg32）选文件。它是模态的，且**会临时抢前台** ——
+	//   和右键菜单一个道理，我们的窗口带 WS_EX_NOACTIVATE，所以先把该标志摘掉，
+	//   否则对话框可能被压在别的窗口后面、用户以为"点了没反应"。
+	//   这也解释了为什么 openFileName 的 owner 必须传 hwnd 而不是 nullptr。
+	// ---------------------------------------------------------------------------
+	void DockWin::addItem()
+	{
+		wchar_t file[MAX_PATH * 2]{};
+
+		OPENFILENAMEW ofn{};
+		ofn.lStructSize = sizeof(ofn);
+		ofn.hwndOwner = hwnd;
+		ofn.lpstrFilter = L"程序 (*.exe;*.lnk)\0*.exe;*.lnk\0所有文件\0*.*\0\0";
+		ofn.lpstrFile = file;
+		ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+		ofn.lpstrTitle = L"选择要加到 Dock 的程序";
+		ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+		const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+		const BOOL picked = GetOpenFileNameW(&ofn);
+		SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+
+		if (!picked) {
+			// 用户取消：ComDlg 会往自己的 buffer 写 CDERR_*，这里只记一行，别弹框
+			log(std::format(L"[dock] 添加程序：用户取消（CommDlgExtendedError={}）",
+				static_cast<unsigned>(CommDlgExtendedError())));
+			return;
+		}
+
+		auto* cfg = Config::get();
+		const std::wstring path{ file };
+		// 已经在列表里就不重复加（否则会出现两个一模一样的图标，删起来也麻烦）
+		for (const auto& it : cfg->items) {
+			if (_wcsicmp(it.path.c_str(), path.c_str()) == 0) {
+				log(L"[dock] 添加程序：该程序已在 Dock 里，忽略");
+				return;
+			}
+		}
+
+		const auto backup = cfg->items;
+		cfg->items.push_back(ItemConfig{ path, {} });
+		if (!cfg->save()) {
+			cfg->items = backup;
+			log(L"[dock] 添加程序：写盘失败，已回退");
+			return;
+		}
+
+		log(std::format(L"[dock] 已添加 {}，重建界面", path));
+		rebuild();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 图标级右键菜单。命令 id 与全局菜单**共用一张表**（都在同一个消息循环上），
+	// 所以两项用同一组 id：kMenuOpen / kMenuOpenAdmin / kMenuRemove。
+	// ---------------------------------------------------------------------------
+	void DockWin::showItemContextMenu(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+		const std::wstring name = items[index].name;
+		log(std::format(L"[menu] 图标菜单 index={} ({})", index, name));
+
+		HMENU menu = CreatePopupMenu();
+		if (!menu) return;
+		// 首行是个不可点的标题（显示是哪个图标）。用 MF_DISABLED 而不是 MF_GRAYED：
+		// 灰掉的标题看着像"功能不可用"，而这里只是标题。
+		AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, name.c_str());
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
+		AppendMenuW(menu, MF_STRING, kMenuOpenAdmin, L"以管理员身份打开");
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
+
+		POINT pt{};
+		GetCursorPos(&pt);
+		const UINT cmd = popupMenuHere(menu, pt);
+		switch (cmd) {
+		case kMenuOpen:      launch(index);         break;
+		case kMenuOpenAdmin: launchAdmin(index);    break;
+		case kMenuRemove:    removeItem(index);     break;
+		default: break;
+		}
+	}
+
+	void DockWin::launchAdmin(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+		const auto& path = items[index].path;
+
+		// ShellExecuteW 的 "runas" 会弹 UAC。用户取消时返回 <= 32（不是异常），
+		// 记一行日志即可，别弹框打扰（该用户明确讨厌 MessageBox）。
+		const HINSTANCE r = ShellExecuteW(nullptr, L"runas", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		if (reinterpret_cast<INT_PTR>(r) <= 32) {
+			log(std::format(L"[dock] runas 启动被拒/失败（{}），code={}", path, reinterpret_cast<INT_PTR>(r)));
+		}
+
+		hoverIndex = -1;
+		applyHover(-1);
+		ensureHoverTimer(false);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 从 Dock 移除一项并落盘。顺序很重要：
+	//   1) 先改内存 + 写 config（写失败就整体回退，别让界面和磁盘不一致）
+	//   2) 再重建界面（重建会重新读 Config，所以必须先写完）
+	// ---------------------------------------------------------------------------
+	void DockWin::removeItem(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+
+		auto* cfg = Config::get();
+		if (index < static_cast<int>(cfg->items.size())) {
+			const auto backup = cfg->items;   // 写失败要回退，先留一份
+			cfg->items.erase(cfg->items.begin() + index);
+			if (!cfg->save()) {
+				cfg->items = backup;
+				log(L"[dock] 移除项写盘失败，已回退（Dock 不变）");
+				return;
+			}
+		}
+
+		log(std::format(L"[dock] 已移除第 {} 项，重建界面", index));
+		rebuild();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 用 config.json 的最新内容重建整个界面。
+	// 走"销毁所有子节点 + 重新走一遍 onCreated 的那套构造"，
+	// 而不是逐项增量增删 —— 阶段二的项数很少，重建更不容易漏状态。
+	// ---------------------------------------------------------------------------
+	void DockWin::rebuild()
+	{
+		if (!hwnd) return;
+
+		// 先复位悬停状态：节点马上要全部消失，留着 hoverIndex 会去访问野指针
+		hoverIndex = -1;
+		ensureHoverTimer(false);
+		items.clear();
+		panel = nullptr;
+		row = nullptr;
+
+		// body 是 Ling 的根节点，清空它 = 抹掉 panel / row / 所有 IconNode
+		if (body) body->removeAllChildren();
+
+		applyConfig();
+		collectItemsFromConfig();
+
+		// 项数变了 → 面板宽度也变了 → 窗口尺寸/位置都要跟着改
+		const float winW = panelW() + 2 * kSideSlack;
+		const float winH = kHaloH + panelH();
+		setSize(winW, winH);
+
+		RECT work{};
+		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+		const int panelWpx = static_cast<int>(px(panelW()));
+		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
+		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
+		setPosition(panelLeft - static_cast<int>(px(kSideSlack)), panelBottom - static_cast<int>(h));
+
+		onCreated();
+
+		loadIcons();
+		layout();
+		updateHitRegion();
+		refresh();
+		log(std::format(L"[dock] 重建完成，{} 项", items.size()));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 重新读 config.json 并按新值重建。用户手改了配置后不必重启进程。
+	// ⚠ 注意顺序：先 load 再 rebuild —— rebuild 内部会再 applyConfig/collect，
+	//   它读的是 Config 的内存态，所以 load 必须在前。
+	// ---------------------------------------------------------------------------
+	void DockWin::reloadConfig()
+	{
+		Config::get()->load();
+		rebuild();
 	}
 
 	LRESULT DockWin::onHitTest(const POINT pos)

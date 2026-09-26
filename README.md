@@ -2,18 +2,21 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段一（垂直切片 / gate）已完成并通过**（含两处 bug 修复，见 `CHANGELOG.md` 0.1.1）。
+当前进度：**阶段二（配置持久化）已完成**（阶段一 gate 24/24，两个 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
-已实现（阶段一范围）：
+已实现：
 
-- 贴主屏工作区底边居中的半透明圆角面板（`#1A1A1A` @ 80% 不透明度，圆角 12 逻辑像素）
-- 6 个真实应用图标，源图取 shell 的 **256px jumbo** 图标缓存，用 WIC 的 Fant 缩放预处理到峰值像素
-- 悬停鱼眼放大：峰值 1.7×，相邻图标按距离衰减；锚点在图标底边中点（自下而上长大）
+- 贴主屏工作区底边居中的半透明圆角面板，背景色 / 圆角 / 底边留白**均可配置**
+- 图标列表来自 **`config.json`**（首次启动自动写出默认配置），项数、图标大小、间距、悬停缩放、动画时长全部可调
+- 真实应用图标，源图取 shell 的 **256px jumbo** 图标缓存，用 WIC 的 Fant 缩放预处理到峰值像素
+- 悬停鱼眼放大：峰值倍率可配，相邻图标按距离衰减；锚点在图标底边中点（自下而上长大）
 - 动画全部走 Composition keyframe，**不 relayout、不 repaint**
 - halo 透明区鼠标穿透（窗口 region 方案，见下文）
-- 左键启动图标（`ShellExecuteW`）、右键菜单（目前只有"退出 ZDock"）
+- 左键启动图标（`ShellExecuteW`）
+- **图标级右键菜单**：打开 / 以管理员身份打开 / 从 Dock 移除（移除即落盘 `config.json`）
+- **空白处右键菜单**：添加程序… / 重新载入配置 / 退出 ZDock（手改配置不必重启进程）
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
 - 单实例：**自己命名的 mutex**（`Src/SingleInstance.*`）——
@@ -25,11 +28,53 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 |---|---|
 | 红线自检 | 窗口 `GA_PARENT` = 桌面、无 owner；启动前后 explorer 的 `WorkerW` 计数不变（14 → 14） |
 | 鼠标穿透 | halo 点已不属于 dock（`WindowFromPoint` 返回下层窗口）；真实点击落到下层窗口 1 次；面板实体的点击被 dock 吃掉（下层 0 次） |
-| 性能 | 空闲 10s CPU 增量 **0.000s**；悬停扫动 3s 期间 **≈2% 单核**；移开后回落 |
+| 性能 | 空闲 10s CPU 增量 **0.000s**；悬停扫动 3s 期间 **≈3% 单核**；移开后回落 |
 | 位置 | 面板底边 = 工作区底边 − 6 逻辑像素（实测 1433 = 1433）；水平居中（误差 0px） |
-| 渲染 | 空闲/悬停两张 PrintWindow 截图差 9678 像素（证明放大动画确实在画） |
+| 渲染 | 空闲/悬停两张 PrintWindow 截图差 15354 像素（证明放大动画确实在画） |
 
-截图见 `build/_review/zdock_idle.png`（空闲）与 `zdock_hover.png`（悬停，中间图标放大）。
+阶段二实测（`_probe_config.py` / `_probe_remove_item.py` / `_probe_ui_remove.py` / `_probe_ui_add.py`，**12 项全 PASS**）：
+
+| 覆盖 | 结果 |
+|---|---|
+| 首次启动 | 自动写出带默认值的 `config.json`；Dock 正常显示 6 项 |
+| 改值生效 | `iconSize=64` / `hoverScale=2.2` / `bottomMargin=90` 重启后日志与行为一致 |
+| 坏值兜底 | `iconSize=9999` 回默认 48、非法 `bgColor` 回默认色，**且用户文件字节未变** |
+| 坏 JSON | 整份语法坏掉 → 回默认值，**用户文件字节未变** |
+| 空列表 | `items: []` 保持 0 项（不被塞回默认）；空 Dock 不崩 |
+| 右键移除 | 真实菜单点击 → 落盘 → 界面从 4 项重建为 3 项 |
+| 添加程序 | 空白右键 → 文件选择框 → 落盘 → 界面从 2 项重建为 3 项 |
+
+截图见 `build/_review/`：`zdock_idle.png` / `zdock_hover.png`（阶段一）、
+`stage2_default.png` / `stage2_hover.png` / `stage2_menu.png` / `stage2_menu_global.png`（阶段二）。
+
+## 配置
+
+exe 同目录的 `config.json`，首次启动自动生成。全部字段与默认值：
+
+```jsonc
+{
+  "iconSize": 48,          // 图标基准边长（逻辑像素），范围 [16, 256]
+  "iconGap": 12,           // 图标间距，[0, 128]
+  "hoverScale": 1.7,       // 悬停峰值缩放，[1, 4]
+  "animMs": 150,           // 放大/缩回动画时长（毫秒），[0, 2000]
+  "bottomMargin": 6,       // 面板距工作区底边（逻辑像素），[0, 400]
+                           //   任务栏设成自动隐藏时调大些可少抢底部热区
+  "bgColor": "#1A1A1ACC",  // 面板背景色：#RRGGBB 或 #RRGGBBAA
+  "cornerRadius": 12,      // 面板圆角，[0, 128]
+  "items": [               // 图标列表；顺序即显示顺序
+    { "path": "C:\\Windows\\explorer.exe" },
+    { "path": "C:\\Windows\\System32\\notepad.exe", "name": "记事本" }
+  ]
+}
+```
+
+- `name` 可省略，省略时从文件名推。`items` 为空数组 = 故意清空 Dock，不会被塞回默认。
+- **数值超范围回默认值**（不是钳到边界）—— 填 9999 明显是笔误，钳成 256 会得到一个
+  你没想要又不易察觉的结果。
+- **配置坏掉时不会覆盖你的文件**：JSON 语法错、字段类型错都只是回默认值，
+  磁盘上的文件原样不动，日志里有一行说明哪个字段被忽略了。
+- 改完**不必重启进程**：空白处右键 → 「重新载入配置」。
+- 增删图标也可以完全走 UI：图标上右键 → 「从 Dock 移除」；空白处右键 → 「添加程序…」。
 
 ## 构建
 
@@ -40,7 +85,7 @@ bash build-support/build.sh
 - 直接调 `cl.exe / link.exe / rc.exe`，**不走 MSBuild**（本机没有 .NET SDK，也不需要）。
 - Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-v1.3.0-x64`（发布包）→ `../Ling`（源码树）。
   `LING_FROM_SOURCE=1` 强制用源码树。
-- 产物：`build/bin/ZDock.exe`（约 330 KB）。
+- 产物：`build/bin/ZDock.exe`（约 340 KB）。
 
 依赖的硬约定（踩过的坑，改构建脚本前先看 `build-support/build.sh` 里的注释）：
 
@@ -48,33 +93,49 @@ bash build-support/build.sh
    会被 Ling 的 `include/WinBase.h` 抢走，`windows.h` 的基础类型整片消失，报错却指向
    `rpcasync.h` 的 `OVERLAPPED` 未定义。Ling 的头一律写成 `<include/xxx.h>`。
 2. **运行时库必须 `/MT`**（与 Ling / ZPin 一致），否则 LNK2038。
-3. **手工调 `link.exe` 要自己列出系统默认库**（user32 / shell32 / ole32 …），MSBuild 才会替你加。
+3. **手工调 `link.exe` 要自己列出系统默认库**（user32 / shell32 / ole32 / comdlg32 …），
+   MSBuild 才会替你加。
 4. `wWinMain` 的第三参数是 `LPWSTR`（SDK 声明如此），写成 `LPTSTR` 在非 UNICODE 构建下撞声明报 C2731。
+5. **用 WinRT JSON 必须同时引 `winrt/Windows.Foundation.Collections.h`**：
+   `JsonObject::HasKey` / `JsonArray::Size/GetAt/Append` 都是 `IVector`/`IMap` 上的
+   **auto 返回**函数，只引 `Windows.Data.Json.h` 会 C3779。
 
 ## 验证
 
 ```bash
-<python> build-support/zdock_stage1_test.py          # 完整 gate（约 30s，会真实移动鼠标，结束自动还原）
-<python> build-support/_probe_passthrough.py         # 只查穿透：看命中归属与 [hit] 日志（需 ZDOCK_VERBOSE_HIT=1）
-<python> build-support/_probe_click.py               # 只查"真实鼠标注入在这台机器上通不通"
+<python> build-support/zdock_stage1_test.py          # 阶段一 gate（约 30s）
+<python> build-support/_probe_config.py              # config.json 生成/读值/兜底/不覆盖（6 项）
+<python> build-support/_probe_remove_item.py         # 删除与边界（含空 Dock）（5 项）
+<python> build-support/_probe_ui_remove.py           # 真实 UI 走一遍"从 Dock 移除"
+<python> build-support/_probe_ui_add.py              # 真实 UI 走一遍"添加程序…"
+<python> build-support/_shot_stage2.py               # 阶段二验收截图
+<python> build-support/_probe_hover_jitter.py        # 悬停抖动量化（阶段一 bug 2 的回归）
+<python> build-support/_probe_cross_instance.py      # ZPin/ZDock 共存（阶段一 bug 1 的回归）
 ```
 
-`ZDOCK_VERBOSE_HIT=1` 时 dock 会把每次命中判定写进日志（仅在结果变化或位移 >20px 时记一行）。
+⚠ 涉及真实 UI 的三个脚本（`_probe_ui_*` / `_shot_stage2.py`）会**模拟鼠标点击与光标移动**，
+跑的时候不要去动键盘鼠标 —— 模拟输入可能把焦点抢到你当前的活动窗口上。
+它们全程在**隔离临时目录**里跑（复制一份 exe 过去），不会碰你手上的 `config.json`。
+
+`ZDOCK_VERBOSE_HIT=1` 时 dock 会把每次命中判定写进日志（仅在结果变化或位移 >20px 时记一行）；
+`ZDOCK_VERBOSE_HOVER=1` 记录每次 hover 变更。
 
 ## 目录
 
 ```
 Src/
-  main.cpp          入口：DPI 感知 → Ling::init → 建 DockWin → 消息循环
-  DockWin.h/.cpp    主窗口：布局常量、图标行、悬停、命中区域（region）、菜单
-  IconNode.h/.cpp   自绘图标节点：surface 绘制 + Composition 缩放动画
-  IconLoader.h/.cpp 图标提取：SHGetImageList(jumbo) → HICON → WIC → D2D 位图
-  Log.h/.cpp        轻量日志（exe 同目录 ZDock.log）
-  Res/Resource.rc   VERSIONINFO（版本号唯一来源）
+  main.cpp            入口：DPI 感知 → 单实例 mutex → Ling::init → 建 DockWin → 消息循环
+  DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建
+  Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
+  SingleInstance.h/.cpp  命名 mutex 单实例
+  IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画
+  IconLoader.h/.cpp   图标提取：SHGetImageList(jumbo) → HICON → WIC → D2D 位图
+  Log.h/.cpp          轻量日志（exe 同目录 ZDock.log）
+  Res/Resource.rc     VERSIONINFO（版本号唯一来源）
 build-support/
-  _msvc_env.sh      cl/link/rc 的最小环境
-  build.sh          构建脚本
-  zdock_stage1_test.py, _probe_*.py   验证与诊断脚本
+  _msvc_env.sh        cl/link/rc 的最小环境
+  build.sh            构建脚本
+  zdock_stage1_test.py, _probe_*.py, _shot_stage2.py   验证 / 诊断 / 截图
 ```
 
 ## 关键设计说明
@@ -139,12 +200,34 @@ Ling 那个方法靠 `FindWindow(L"STATIC", appID)` 判定，而 appID 来自
 ZDock 改用自己命名的 mutex（`Local\ZDock.SingleInstance.{GUID}`，在 `Ling::init()` 之前占位）。
 Ling 上游也已修：`App::appID` 改为按 exe 完整路径做哈希，不同程序必然不同。
 
+### 菜单 / 对话框：**owner 必须是真实窗口，且要先摘掉 `WS_EX_NOACTIVATE`**
+
+`Ling::App::popupMenu()` 把 owner 传成 `msgHwnd` —— 那是个 `HWND_MESSAGE` 的**消息专用窗口**。
+消息专用窗口没有真实窗口层级，`SetForegroundWindow` 必然失败，`TrackPopupMenuEx`
+找不到可归属的 owner，于是**菜单根本不显示、直接返回 0**。
+（托盘场景恰好能用，因为托盘菜单走 shell 那条路；窗口内右键就不行。）
+
+ZDock 改用 `DockWin::popupMenuHere()`：owner 用自己的真实 `hwnd`，并在弹出前
+**临时摘掉 `WS_EX_NOACTIVATE`** 以便拿到前台权（弹完还原）。
+`GetOpenFileNameW`（"添加程序…"）同理 —— 不摘这个标志的话，对话框可能被压在别的窗口后面，
+用户以为"点了没反应"。不摘回来则会让"点图标不抢焦点"这条承诺失效。
+
+### 配置读写：坏数据不能毁掉用户的文件
+
+四条约定（见 `Src/Config.h` 的注释）：文件不存在就写默认值；**解析失败绝不覆盖**；
+每个字段独立取值 + 独立兜底；保存走临时文件 + `MoveFileExW` 原子替换。
+数值超范围**回默认值而非 clamp** —— 填 9999 明显是笔误，钳到边界会得到一个
+用户没想要又不易察觉的结果。
+
+`items` 是**空数组**时保持空（用户故意清空 Dock）；只有整个 `items` 键缺失才回默认表。
+
 ## 已知限制 / 下一步
 
-- 图标列表**暂时写死在代码里**（`DockWin::collectDefaultItems`），阶段二接 `config.json`。
-- 右键菜单只有"退出"；图标级菜单（打开 / 管理员运行 / 移除）、设置界面未做。
 - 悬停标签（名称气泡）未做。
 - 显示器变化（`WM_DISPLAYCHANGE` / DPI 变化）没有处理 —— Ling 的窗口过程不暴露消息口，
   需要子类化或给 Ling 加钩子。
-- 未做窗口列表跟踪 / 运行指示 / 自动隐藏 / 拖放 / 多显示器 —— 属阶段三及以后。
-- 忽略键盘与无障碍（阶段一不涉及）。
+- 配置**改动后需要手动"重新载入配置"**（或重启）才生效；文件变更监听（`ReadDirectoryChangesW`）未做。
+- 拖放排序 / 拖放添加未做。
+- 菜单用的是系统默认 UI 字体，与面板自绘风格不完全统一。
+- 未做窗口列表跟踪 / 运行指示 / 自动隐藏 / 多显示器 —— 属阶段三及以后。
+- 忽略键盘与无障碍。
