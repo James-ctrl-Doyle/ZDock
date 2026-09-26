@@ -30,6 +30,16 @@ OBJ="$OUT/obj"
 BIN="$OUT/bin"
 mkdir -p "$OBJ" "$BIN"
 
+# ⚠ 链接前先确认没有残留的 ZDock 在跑 —— 它锁着 ZDock.exe，link 会报
+#   LNK1104「无法打开文件 ZDock.exe」，看起来像权限问题，其实是自己上次没退干净。
+#   探针脚本异常退出时经常会留下这种孤儿进程。
+if tasklist /FI "IMAGENAME eq ZDock.exe" 2>/dev/null | grep -qi "ZDock.exe"; then
+    echo "!! 检测到残留的 ZDock.exe 进程（会锁住输出文件）" >&2
+    tasklist /FI "IMAGENAME eq ZDock.exe" 2>/dev/null | grep -i "ZDock.exe" >&2
+    echo "   先关掉它再构建：  taskkill /F /IM ZDock.exe" >&2
+    exit 1
+fi
+
 CL_FLAGS=(
     -nologo -c -std:c++20 -EHsc -utf-8 -permissive- -W3
     -O2 -Oi -Gy -MT -DNDEBUG
@@ -45,8 +55,10 @@ SRCS=(
     "$ROOT/Src/Log.cpp"
     "$ROOT/Src/Config.cpp"
     "$ROOT/Src/SingleInstance.cpp"
+    "$ROOT/Src/WindowTracker.cpp"
     "$ROOT/Src/IconLoader.cpp"
     "$ROOT/Src/IconNode.cpp"
+    "$ROOT/Src/IndicatorNode.cpp"
     "$ROOT/Src/DockWin.cpp"
     "$ROOT/Src/main.cpp"
 )

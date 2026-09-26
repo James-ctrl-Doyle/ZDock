@@ -2,7 +2,8 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段二（配置持久化）已完成**（阶段一 gate 24/24，两个 bug 已根因级修复，见 `CHANGELOG.md`）。
+当前进度：**阶段三（窗口跟踪 / 运行指示 / 临时图标）已完成**
+（阶段一 gate 24/24，阶段二 12 项、阶段三 13 项探针全 PASS；两个 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -14,8 +15,15 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 - 悬停鱼眼放大：峰值倍率可配，相邻图标按距离衰减；锚点在图标底边中点（自下而上长大）
 - 动画全部走 Composition keyframe，**不 relayout、不 repaint**
 - halo 透明区鼠标穿透（窗口 region 方案，见下文）
-- 左键启动图标（`ShellExecuteW`）
-- **图标级右键菜单**：打开 / 以管理员身份打开 / 从 Dock 移除（移除即落盘 `config.json`）
+- **事件驱动窗口跟踪**（`Src/WindowTracker.*`）：`RegisterShellHookWindow` 为主通道 +
+  3 个 `SetWinEventHook` 补充，**完全不轮询**
+- **运行指示器**：图标下缘 4px 圆点（强调色 `#4CC2FF`），前台应用满色、后台运行半透明
+- **临时图标**：在跑但没被固定到 Dock 的应用自动补图标（`Opacity 0.82` 与固定项区分），
+  窗口全关后自动回收
+- **点击切换**：已运行 → 切到那个窗口；多窗口给列表菜单（含「关闭全部窗口」）；未运行 → 启动
+- 按下反馈（缩到 0.92）与注意请求弹跳（`HSHELL_FLASH` → 图标上弹一次）
+- **图标级右键菜单**：固定项给 打开 / 以管理员身份打开 / 从 Dock 移除；
+  临时项给 固定到 Dock / 关闭全部窗口
 - **空白处右键菜单**：添加程序… / 重新载入配置 / 退出 ZDock（手改配置不必重启进程）
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
@@ -44,8 +52,20 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 | 右键移除 | 真实菜单点击 → 落盘 → 界面从 4 项重建为 3 项 |
 | 添加程序 | 空白右键 → 文件选择框 → 落盘 → 界面从 2 项重建为 3 项 |
 
+阶段三实测（`_probe_track_api.py` 5/5 + `_probe_stage3.py` **13/13**）：
+
+| 覆盖 | 结果 |
+|---|---|
+| 事件机制可用 | `SetWinEventHook` / `RegisterShellHookWindow` 都能收到跨进程事件，能从事件解析出 exe 路径 |
+| 事件量 | 3 秒内 win event 260 CREATE / 249 SHOW / 252 NAMECHANGE；shell hook 个位数 → 主用后者 |
+| 跟踪器启动 | 日志有 `[track] 已启动 shellHookMsg=0xC028 hooks=true/true/true` 与全量重建 |
+| 增量补临时图标 | 启动 `charmap`（不在 config）→ 日志 `运行 5 组，共 9 项（其中临时 4）` |
+| 自动回收 | 关掉它 → `运行 4 组，共 8 项（其中临时 3）` |
+| 点击不崩 | `PostMessage` 投递左键到图标位置后进程存活 |
+
 截图见 `build/_review/`：`zdock_idle.png` / `zdock_hover.png`（阶段一）、
-`stage2_default.png` / `stage2_hover.png` / `stage2_menu.png` / `stage2_menu_global.png`（阶段二）。
+`stage2_default.png` / `stage2_hover.png` / `stage2_menu.png` / `stage2_menu_global.png`（阶段二）、
+`stage3_default.png` / `stage3_temp_icon.png` / `stage3_hover.png` / `stage3_menu_temp.png`（阶段三）。
 
 ## 配置
 
@@ -104,38 +124,53 @@ bash build-support/build.sh
 
 ```bash
 <python> build-support/zdock_stage1_test.py          # 阶段一 gate（约 30s）
+<python> build-support/_probe_track_api.py           # 阶段三最贵假设：跟踪 API 是否可用（5 项）
+<python> build-support/_probe_stage3.py              # 阶段三：跟踪/指示器/临时图标（13 项）
 <python> build-support/_probe_config.py              # config.json 生成/读值/兜底/不覆盖（6 项）
 <python> build-support/_probe_remove_item.py         # 删除与边界（含空 Dock）（5 项）
 <python> build-support/_probe_ui_remove.py           # 真实 UI 走一遍"从 Dock 移除"
 <python> build-support/_probe_ui_add.py              # 真实 UI 走一遍"添加程序…"
 <python> build-support/_shot_stage2.py               # 阶段二验收截图
+<python> build-support/_shot_stage3.py               # 阶段三验收截图
 <python> build-support/_probe_hover_jitter.py        # 悬停抖动量化（阶段一 bug 2 的回归）
 <python> build-support/_probe_cross_instance.py      # ZPin/ZDock 共存（阶段一 bug 1 的回归）
 ```
 
-⚠ 涉及真实 UI 的三个脚本（`_probe_ui_*` / `_shot_stage2.py`）会**模拟鼠标点击与光标移动**，
-跑的时候不要去动键盘鼠标 —— 模拟输入可能把焦点抢到你当前的活动窗口上。
-它们全程在**隔离临时目录**里跑（复制一份 exe 过去），不会碰你手上的 `config.json`。
+⚠ **验证原则：不抢用户的输入焦点。** 优先走两条路 ——
 
-`ZDOCK_VERBOSE_HIT=1` 时 dock 会把每次命中判定写进日志（仅在结果变化或位移 >20px 时记一行）；
-`ZDOCK_VERBOSE_HOVER=1` 记录每次 hover 变更。
+1. **日志取证**：关键状态变化（分组集合、指示器坐标）都写日志，探针读日志判断；
+2. **`PostMessage` 注入**：需要驱动鼠标事件时把 `WM_LBUTTONDOWN/UP` 投递到目标窗口，
+   不移动真实光标。
+
+只有"悬停放大"这类必须真实光标位置的场景才用 `SetCursorPos`，且用完立刻恢复。
+（阶段二曾用 `SetCursorPos + mouse_event` 去点模态菜单，把用户的 WorkBuddy 焦点抢走、
+对话任务被取消 —— 所以阶段三改成上面这套。）
+
+涉及真实 UI 的两个脚本（`_probe_ui_*` / `_shot_stage2.py`）仍**会模拟鼠标点击与光标移动**，
+跑的时候不要去动键盘鼠标。它们全程在**隔离临时目录**里跑（复制一份 exe 过去），
+不会碰你手上的 `config.json`。
+
+诊断日志开关：`ZDOCK_VERBOSE_HIT=1`（每次命中判定，仅在结果变化或位移 >20px 时记一行）、
+`ZDOCK_VERBOSE_HOVER=1`（每次 hover 变更）、`ZDOCK_VERBOSE_IND=1`（指示器定位坐标）。
 
 ## 目录
 
 ```
 Src/
   main.cpp            入口：DPI 感知 → 单实例 mutex → Ling::init → 建 DockWin → 消息循环
-  DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建
+  DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建、跟踪接线
+  WindowTracker.h/.cpp  事件驱动窗口跟踪：shell hook + win event，分组 / 运行状态 / 全屏判定
   Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
   SingleInstance.h/.cpp  命名 mutex 单实例
-  IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画
+  IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画 + 按下 / 弹跳 / 临时态
+  IndicatorNode.h/.cpp  运行指示器：独立节点画 4px 圆点（不随图标缩放）
   IconLoader.h/.cpp   图标提取：SHGetImageList(jumbo) → HICON → WIC → D2D 位图
   Log.h/.cpp          轻量日志（exe 同目录 ZDock.log）
   Res/Resource.rc     VERSIONINFO（版本号唯一来源）
 build-support/
   _msvc_env.sh        cl/link/rc 的最小环境
-  build.sh            构建脚本
-  zdock_stage1_test.py, _probe_*.py, _shot_stage2.py   验证 / 诊断 / 截图
+  build.sh            构建脚本（含残留进程守卫）
+  zdock_stage1_test.py, _probe_*.py, _shot_stage3.py   验证 / 诊断 / 截图
 ```
 
 ## 关键设计说明
@@ -221,6 +256,79 @@ ZDock 改用 `DockWin::popupMenuHere()`：owner 用自己的真实 `hwnd`，并�
 
 `items` 是**空数组**时保持空（用户故意清空 Dock）；只有整个 `items` 键缺失才回默认表。
 
+### 窗口跟踪：**主用 shell hook，win event 只补三个**（绝不轮询）
+
+两条路都实测过（`build-support/_probe_track_api.py`）。同一个 3 秒窗口内起一个应用：
+
+| 事件源 | 事件量 |
+|---|---|
+| `SetWinEventHook`（CREATE / SHOW / NAMECHANGE 全订） | 260 / 249 / 252 次 |
+| `RegisterShellHookWindow` | **个位数** |
+
+所以主通道是 shell hook；`SetWinEventHook` 只订 `EVENT_SYSTEM_MINIMIZESTART/END`
+与 `EVENT_OBJECT_NAMECHANGE` 这三个 shell hook 拿不到的。**订阅面窄是关键**，
+全订等于给自己造了个高频回调（变相轮询，违反红线 4）。
+
+两个容易记反/搞错的点：
+
+- shell hook 的参数是 **`wParam` = 事件码（`HSHELL_*`）、`lParam` = HWND**，不是反过来；
+- 消息号来自 `RegisterWindowMessageW("SHELLHOOK")`（本机实测 `0xC028`），
+  **不是**固定的 `WM_*`。按"除 WM_CREATE 外全部"来收会把无关消息混进来。
+
+跟踪器自己建一个 0x0 的隐藏窗口收消息 —— Ling 的 `WinBase::winProc` 是静态私有的、
+不暴露消息口，借不了 dock 主窗口。
+
+过滤规则（任务书 §9.4）：可见顶层窗口 + 无 owner + 非 `WS_EX_TOOLWINDOW`
++ 非 DWM cloaked（UWP 切到别的虚拟桌面时 `IsWindowVisible` 仍为 TRUE，只能靠
+`DwmGetWindowAttribute(DWMWA_CLOAKED)` 排除）。分组键**双轨**：能拿到 AUMID 就用
+AUMID，否则用小写 exe 路径 —— UWP 没有传统 exe 路径，只靠路径会把它们全并成一个。
+`ApplicationFrameWindow` **不要无脑排除**（某 Dock 因此完全不可用），要下钻取子窗口。
+
+### 结构增删**就地做，绝不借道 `rebuild()`**
+
+第一版 `syncWithTracker()` 发现"临时图标要增删"时直接调 `rebuild()`，
+而 `rebuild()` 结尾又调回 `syncWithTracker()` —— **无限循环**（日志里刷了 23 次
+"重建完成"）。而且 `rebuild()` 内部会 `items.clear()` 再只恢复固定项，
+所以第二次进来临时项"又不见了"，`needRebuild` 永远为真。
+
+现在：`row->makeChild<IconNode>()` / `removeChild()` 就地增删 →
+`relayoutForItemCount()` 重算面板宽度与窗口尺寸（**不销毁节点**）。
+
+**这类互调很难在写的时候看出来**，因为两处改动可能隔了几百行。
+通用规则：一个"重建"函数如果在结尾调用某个"同步"函数，那"同步"函数里就绝不能再调"重建"。
+
+### 指示器定位：**坐标系 + 单位，同一段代码两个坑**
+
+`IndicatorNode` 必须独立（不能画在 `IconNode` 的 surface 上 —— 那张 surface 会随
+悬停放大动画一起缩放，而指示器要恒定 4px）。摆位置时连撞两个坑，**都不报错、不崩溃**：
+
+1. **坐标系**：Ling 的 `Node::x/y` 是**绝对坐标**（相对窗口客户区），不是相对父节点。
+   实测 `row->x == row 里第一个 IconNode->x == 77`。叠加父节点偏移会整体偏出去。
+2. **单位**：`node->x/y/w/h` 读出来是**物理像素**（yoga 输出已乘 dpi），
+   而 `setPosition` / `setSize` 内部**会再乘一次 dpi**。
+   第一版把物理值直接喂进去，位置被放大 1.24 倍跑到窗口外 —— 透明合成窗口里
+   完全没有视觉反馈，看着就像"没画出来"。
+
+```cpp
+const float d = (dpi > 0.f) ? dpi : 1.f;
+const float cxLog = (item.node->x + item.node->w * 0.5f) / d;   // 物理 → 逻辑
+const float yLog  = (item.node->y + item.node->h) / d + kIndicatorGap;
+item.indicator->setPosition(Ling::Edge::Left, cxLog - kIndicatorDia * 0.5f);
+item.indicator->setPosition(Ling::Edge::Top,  yLog);
+```
+
+Ling 的坐标/单位约定（实测，文档没写全）：
+
+| 接口 | 期望单位 |
+|---|---|
+| `Node::x/y/w/h`（读） | **物理像素** |
+| `Node::setPosition` / `setSize` | **逻辑像素**（内部 ×dpi） |
+| `WinBase::setSize` / `setPosition`（窗口级） | **物理像素**（不乘） |
+
+排查手段：`ZDOCK_VERBOSE_IND=1` 让 `placeIndicators()` 把**算出来的坐标**和**面板坐标**
+一起打日志，一眼核对"指示器 y 是否 < 面板底边"。**算得对但画不对 → 怀疑单位/坐标系；
+算出来就超界 → 算法问题**，这一步区分能省掉大量瞎猜。
+
 ## 已知限制 / 下一步
 
 - 悬停标签（名称气泡）未做。
@@ -229,5 +337,9 @@ ZDock 改用 `DockWin::popupMenuHere()`：owner 用自己的真实 `hwnd`，并�
 - 配置**改动后需要手动"重新载入配置"**（或重启）才生效；文件变更监听（`ReadDirectoryChangesW`）未做。
 - 拖放排序 / 拖放添加未做。
 - 菜单用的是系统默认 UI 字体，与面板自绘风格不完全统一。
-- 未做窗口列表跟踪 / 运行指示 / 自动隐藏 / 多显示器 —— 属阶段三及以后。
+- **UWP / 打包应用**：跟踪与分组已支持（走 AUMID），但**启动**还不行 ——
+  临时图标没有传统 exe 路径，"固定到 Dock"、点击启动都会拒绝并记一行日志，
+  需要走 `shell:AppsFolder\<AUMID>` 才行（属后续阶段）。
+- 自动隐藏（AppBar / 全屏让位）未做：跟踪器已经把全屏判定与回调预留好了
+  （`fullscreenActive()` / `onFullscreenChanged`），阶段四接上即可。
 - 忽略键盘与无障碍。

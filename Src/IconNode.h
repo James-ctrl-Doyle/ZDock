@@ -34,6 +34,33 @@ namespace zdock {
 		/// <summary>不带动画直接落位（初始化 / DPI 变化后复位用）。</summary>
 		void resetScale();
 
+		/// <summary>
+		/// 运行指示器：图标下缘的小圆点。
+		/// ⚠ 指示器**不画在这张 surface 上** —— surface 会随放大动画一起缩放，
+		///   而任务书要求指示器是固定的 4px 圆点。它由 DockWin 用一个独立的
+		///   sibling 节点绘制（见 DockWin::IndicatorNode）。
+		///   这里只记录状态，供命中测试与重建时读取。
+		/// </summary>
+		void setRunning(bool on);
+
+		/// <summary>按下反馈：缩到 0.92 倍，约 100ms（任务书 §3）。</summary>
+		void setPressed(bool on);
+
+		/// <summary>
+		/// 弹跳动画：图标向上弹一次再落回（注意请求 / 启动反馈用，任务书 §3 约 600ms）。
+		/// 只动 Composition 的 Offset，不 relayout。
+		/// </summary>
+		void bounce();
+
+		/// <summary>临时图标（未固定的运行中应用）用淡化表现，区别于固定项。</summary>
+		void setTemporary(bool on);
+
+		/// <summary>是否处于"临时图标"状态（命中与菜单行为要区分）。</summary>
+		bool temporary() const { return isTemporary; }
+
+		/// <summary>是否在运行（DockWin 用来决定要不要显示指示器）。</summary>
+		bool running() const { return curRunning; }
+
 		void paint();
 
 	protected:
@@ -43,6 +70,10 @@ namespace zdock {
 		Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
 		winrt::Windows::UI::Composition::CompositionDrawingSurface surface{ nullptr };
 		float curScale{ 1.f };
+		float baseScale{ 1.f };      // 不含按下反馈的"目标"缩放
+		bool curRunning{ false };
+		bool curPressed{ false };
+		bool isTemporary{ false };
 	};
 
 } // namespace zdock

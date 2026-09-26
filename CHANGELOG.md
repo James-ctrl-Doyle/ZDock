@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## 0.1.3 · 阶段三（窗口跟踪 / 运行指示 / 临时图标）— 2026-09-26
+
+给 Dock 装上"任务栏语义"：跟踪运行中的顶层窗口，固定图标亮起运行指示器，
+没被固定但在跑的应用自动补临时图标，点图标切换窗口。
+
+### 新增：`WindowTracker`（`Src/WindowTracker.h/.cpp`）
+
+事件驱动的窗口跟踪器，**完全不轮询**（红线 4）。
+
+- 主通道 `RegisterShellHookWindow`（`HSHELL_WINDOWCREATED/DESTROYED/ACTIVATED/
+  RUDEAPPACTIVATED/REDRAW/FLASH`），自建 0x0 隐藏窗口收消息
+  （Ling 的 `winProc` 是静态私有的，借不了 dock 主窗口）
+- `SetWinEventHook` 只补三个 shell hook 拿不到的：`EVENT_SYSTEM_MINIMIZESTART/END`、
+  `EVENT_OBJECT_NAMECHANGE`
+- 过滤规则：可见顶层 + 无 owner + 非 `WS_EX_TOOLWINDOW` + 非 DWM cloaked
+- 分组键**双轨**：AUMID 优先，否则小写 exe 路径；`ApplicationFrameWindow` 下钻取
+  `Windows.UI.Core.CoreWindow`（**不无脑排除**，某 Dock 因此完全不可用）
+- 显示名取 shell 的 `FileDescription`（"记事本" 而不是 "notepad"）
+- `activateWindow()`：`AttachThreadInput` → `SetForegroundWindow` → detach
+- 全屏判定：前台窗口 rect == 显示器 `rcMonitor`（**不是 `rcWork`**）+ 排除最小化
+
+**为什么主用 shell hook**（实测，`_probe_track_api.py`）：同一个 3 秒窗口内，
+`SetWinEventHook` 全订时能来 260 次 CREATE / 249 次 SHOW / 252 次 NAMECHANGE，
+而 shell hook 只有个位数。订阅面窄是关键。
+
+### 新增：运行指示器（`Src/IndicatorNode.h/.cpp`）
+
+图标下缘 4px 圆点，强调色 `#4CC2FF`（任务书 §3）。前台应用满色、后台运行 `0xDD` 半透明。
+
+⚠ 必须是**独立节点**，不能画在 `IconNode` 的 surface 上 —— 那张 surface 会随悬停放大
+动画一起缩放，而指示器要恒定大小。
+
+### 新增：临时图标 + 点击切换 + 分组列表
+
+- `syncWithTracker()` 把图标列表与分组表对齐：固定项挂指示器；在跑但未固定的应用
+  补临时图标（`Opacity 0.82` 与固定项区分）；窗口全关后自动回收
+- 点图标：已运行 → 切窗口；多窗口 → 弹列表菜单（标题 + 「关闭全部窗口」）；
+  未运行 → 启动
+- 临时图标右键：固定到 Dock（写 `config.json`）/ 关闭全部窗口
+- 按下反馈（缩到 0.92，100ms）、`HSHELL_FLASH` → 图标弹跳（`Offset.Y`，600ms）
+
+### 修：三个 bug（都写进了 README「关键设计说明」）
+
+1. **`sync ↔ rebuild` 无限循环** —— 第一版 `syncWithTracker()` 发现要增删临时图标时
+   调 `rebuild()`，而 `rebuild()` 结尾又调回 `syncWithTracker()`。且 `rebuild()` 内部
+   `items.clear()` 后只恢复固定项，导致 `needRebuild` 永远为真。日志里刷了 **23 次**
+   "重建完成"。改成就地 `row->makeChild/removeChild` + `relayoutForItemCount()`。
+2. **指示器坐标系错** —— Ling 的 `Node::x/y` 是**绝对坐标**（相对窗口客户区），
+   不是相对父节点（实测 `row->x == row 里第一个 IconNode->x`）。
+3. **指示器单位错** —— `node->x/y/w/h` 是**物理像素**，而 `setPosition` 内部
+   **会再乘一次 dpi**。第一版把物理值直接喂进去，位置放大 1.24 倍跑到窗口外，
+   透明合成窗口里毫无视觉反馈，看着就像"没画出来"。
+
+### 改：验证方式（不再抢用户焦点）
+
+阶段二用 `SetCursorPos + mouse_event` 点模态菜单，把用户的 WorkBuddy 焦点抢走、
+对话任务被取消。阶段三的验证改成两条不抢焦点的路：**日志取证** + **`PostMessage` 注入**。
+只有"悬停放大"这类必须真实光标位置的场景才用 `SetCursorPos`，且用完立刻恢复。
+
+### 验证
+
+- `_probe_track_api.py` **5/5 PASS**（两个事件机制可用、能从事件解析 exe 路径）
+- `_probe_stage3.py` **13/13 PASS**（跟踪器启动、增量补临时图标、自动回收、点击不崩）
+- 截图：`build/_review/stage3_{default,temp_icon,hover,menu_temp}.png`
+
+产物体积：**669 KB → 734 KB**（增量来自窗口跟踪与属性查询，`propkey`/`dwmapi`/`shell32` 那批）。
+
+---
+
 ## 0.1.2 · 阶段二（配置持久化）— 2026-09-26
 
 把写死在代码里的那套参数和图标表挪进 `config.json`，并补上图标级菜单（增 / 删 / 打开）。

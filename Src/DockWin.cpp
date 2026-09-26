@@ -14,7 +14,13 @@
 namespace zdock {
 
 	DockWin::DockWin() = default;
-	DockWin::~DockWin() = default;
+
+	DockWin::~DockWin()
+	{
+		// ⚠ 跟踪器的钩子必须在窗口销毁**之前**摘掉：它的回调会用到本对象，
+		//   对象没了还留着钩子就是悬空指针。
+		tracker.stop();
+	}
 
 	float DockWin::panelW() const
 	{
@@ -23,7 +29,12 @@ namespace zdock {
 		return n * cfgIconBase + (n - 1) * cfgIconGap + 2 * kPadX;
 	}
 
-	float DockWin::panelH() const { return cfgIconBase + 2 * kPadY; }
+	float DockWin::panelH() const
+	{
+		// 面板底部多留一条指示器的空间：指示器画在图标下缘之外（不挤压图标），
+		// 但它落在面板范围内，否则会悬在面板外面很难看。
+		return cfgIconBase + 2 * kPadY + px(kIndicatorDia + kIndicatorGap) / (dpi > 0.f ? dpi : 1.f);
+	}
 
 	float DockWin::iconsW() const
 	{
@@ -125,16 +136,31 @@ namespace zdock {
 				return;
 			}
 			const int idx = indexAtVisual(pt);
-			if (idx >= 0) launch(idx);
+			if (idx >= 0) {
+				// 按下反馈的抬起（按下是 onMouseDown 里给的）
+				if (items[idx].node) items[idx].node->setPressed(false);
+				clickItem(idx);
+			}
 			});
 
+		// 按下反馈：缩到 0.92（任务书 §3）。只给被按的那个图标。
+		onMouseDown.add([this](POINT pt, bool right) {
+			if (right) return;
+			const int idx = indexAtVisual(pt);
+			if (idx >= 0 && items[idx].node) items[idx].node->setPressed(true);
+			});
 		// 窗口没了就退进程：否则 DestroyWindow 之后消息循环还在空转，留一个
 		// "没窗口没托盘"的僵尸进程（ZPin 那边踩过同款）
 		onDestroy.add([] { Ling::App::get()->quit(0); });
 
 		layout();   // 立刻布一次局，别等第一次 WM_PAINT
 		updateHitRegion();   // 初始命中区域 = 面板本体（halo 完全不参与命中）
+		placeIndicators();   // 图标坐标已定，把指示器摆到位
 		refresh();
+
+		// 跟踪器放最后启动：它一起来就会回调 syncWithTracker()，
+		// 那时界面必须已经完整（panel/row/图标都就位）。
+		startTracker();
 	}
 
 	void DockWin::onCreated()
@@ -160,11 +186,19 @@ namespace zdock {
 		row->setFlexDirection(Ling::FlexDirection::Row);
 		row->setAlignItems(Ling::Align::FlexEnd);
 
+		// 指示器**不放进 row** —— row 是 Flex 容器，多出来的节点会被当成第二个
+		// 图标参与排版。它们挂在 body 上，位置在 layout 完成后按图标坐标算。
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = row->makeChild<IconNode>();
 			node->setSize(cfgIconBase, cfgIconBase);
 			if (i + 1 < items.size()) node->setMarginRight(cfgIconGap);
 			items[i].node = node;
+
+			auto* dot = body->makeChild<IndicatorNode>();
+			dot->setPositionType(Ling::Position::Absolute);
+			dot->setSize(kIndicatorDia, kIndicatorDia);
+			dot->setOn(false);
+			items[i].indicator = dot;
 		}
 	}
 
@@ -470,24 +504,44 @@ namespace zdock {
 		const std::wstring name = items[index].name;
 		log(std::format(L"[menu] 图标菜单 index={} ({})", index, name));
 
+		const bool temporary = items[index].temporary;
+
 		HMENU menu = CreatePopupMenu();
 		if (!menu) return;
 		// 首行是个不可点的标题（显示是哪个图标）。用 MF_DISABLED 而不是 MF_GRAYED：
 		// 灰掉的标题看着像"功能不可用"，而这里只是标题。
 		AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, name.c_str());
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
-		AppendMenuW(menu, MF_STRING, kMenuOpenAdmin, L"以管理员身份打开");
-		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
+
+		if (temporary) {
+			// 临时图标：只能固定或关闭它的全部窗口（它本来就不在配置里）
+			AppendMenuW(menu, MF_STRING, kMenuPin, L"固定到 Dock");
+			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+			AppendMenuW(menu, MF_STRING, kMenuCloseGroup, L"关闭全部窗口");
+		}
+		else {
+			AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
+			AppendMenuW(menu, MF_STRING, kMenuOpenAdmin, L"以管理员身份打开");
+			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+			AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
+		}
 
 		POINT pt{};
 		GetCursorPos(&pt);
 		const UINT cmd = popupMenuHere(menu, pt);
 		switch (cmd) {
-		case kMenuOpen:      launch(index);         break;
-		case kMenuOpenAdmin: launchAdmin(index);    break;
-		case kMenuRemove:    removeItem(index);     break;
+		case kMenuOpen:       launch(index);      break;
+		case kMenuOpenAdmin:  launchAdmin(index); break;
+		case kMenuRemove:     removeItem(index);  break;
+		case kMenuPin:        pinItem(index);     break;
+		case kMenuCloseGroup: {
+			// 关闭这个分组的全部窗口。先拷 hwnd 列表，避免关闭过程中分组结构变化。
+			if (const AppGroup* g = groupOfItem(static_cast<size_t>(index))) {
+				const std::vector<HWND> wins = g->windows;
+				for (HWND wh : wins) closeWindow(wh);
+			}
+			break;
+		}
 		default: break;
 		}
 	}
@@ -572,8 +626,12 @@ namespace zdock {
 		loadIcons();
 		layout();
 		updateHitRegion();
+		placeIndicators();
 		refresh();
 		log(std::format(L"[dock] 重建完成，{} 项", items.size()));
+
+		// 重建之后分组信息要重新对一遍（项集可能变了）
+		syncWithTracker();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -585,6 +643,444 @@ namespace zdock {
 	{
 		Config::get()->load();
 		rebuild();
+	}
+
+	// ===========================================================================
+	// 阶段三：窗口跟踪 / 运行指示 / 临时图标 / 点击切换 / 分组列表
+	// ===========================================================================
+
+	void DockWin::startTracker()
+	{
+		tracker.onLog = [](const std::wstring& s) { log(s); };
+
+		// 分组表变了 → 结构可能要增删（有无新应用在跑）+ 指示器要重刷。
+		tracker.onChanged = [this] { syncWithTracker(); };
+
+		// 前台换了 → 图标高亮（当前应用在用的那个更亮一点）
+		tracker.onForegroundChanged = [this](HWND) { refreshIndicators(); };
+
+		// 窗口请求注意 → 对应图标弹一下
+		tracker.onFlash = [this](HWND hwnd) {
+			const DWORD pid = [hwnd] { DWORD p = 0; GetWindowThreadProcessId(hwnd, &p); return p; }();
+			if (!pid) return;
+			for (auto& item : items) {
+				const AppGroup* g = groupOfItem(&item - items.data());
+				if (!g) continue;
+				const bool hit = std::find(g->windows.begin(), g->windows.end(), hwnd) != g->windows.end();
+				if (hit && item.node) { item.node->bounce(); break; }
+			}
+			};
+
+		// 全屏变化 → 阶段四会用来让位；阶段三先只记日志
+		tracker.onFullscreenChanged = [](bool on) {
+			log(std::format(L"[dock] 全屏应用 {}", on ? L"进入" : L"退出"));
+			};
+
+		if (!tracker.start()) {
+			log(L"[dock] 窗口跟踪器启动失败，运行指示 / 临时图标不可用");
+			return;
+		}
+		tracker.rebuildAll();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 取某图标对应的分组。
+	//   固定项：按 exe 路径找（tracker 内部用小写路径做键）
+	//   临时项：直接用它记住的 groupKey
+	// ---------------------------------------------------------------------------
+	const AppGroup* DockWin::groupOfItem(size_t index) const
+	{
+		if (index >= items.size()) return nullptr;
+		const auto& item = items[index];
+		if (!item.groupKey.empty()) return tracker.findGroup(item.groupKey);
+		return tracker.findByExePath(item.path);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 把图标列表和跟踪器的分组表对齐。
+	//
+	// ⚠ **绝不调用 rebuild()** —— rebuild 结尾又会调回本函数，那就成了
+	//   "sync → rebuild → sync → …" 的无限循环（第一版就是这么写的，
+	//   日志里刷了 23 次"重建完成"）。结构增删一律**就地**做节点增删。
+	//
+	// 两类变化：
+	//   · 固定项：不增删节点，只更新 groupKey / 运行状态
+	//   · 临时项：在跑但没被固定的应用 → 补图标；窗口全关了 → 删图标
+	//
+	// 结构真变了才重新摆布局（面板宽度会变），否则只刷指示器 ——
+	// 每次事件都重建节点会把悬停动画一直打断。
+	// ---------------------------------------------------------------------------
+	void DockWin::syncWithTracker()
+	{
+		if (!hwnd || !body) return;
+
+		// 当前所有在运行的分组键
+		std::vector<std::wstring> running;
+		running.reserve(tracker.groups().size());
+		for (const auto& g : tracker.groups()) {
+			if (g.running()) running.push_back(g.key);
+		}
+
+		// 固定项覆盖了哪些键（这些不该再出临时图标）
+		std::vector<std::wstring> pinned;
+		for (const auto& item : items) {
+			if (item.temporary) continue;
+			if (const AppGroup* g = tracker.findByExePath(item.path)) pinned.push_back(g->key);
+		}
+
+		bool structural = false;
+
+		// 1) 已存在的临时项：分组没了就删掉（连同它的节点）
+		for (size_t i = items.size(); i-- > 0;) {
+			auto& item = items[i];
+			if (!item.temporary) {
+				// 固定项：只刷新 groupKey（应用可能刚起来 / 刚退出）
+				if (const AppGroup* g = tracker.findByExePath(item.path)) item.groupKey = g->key;
+				else item.groupKey.clear();
+				continue;
+			}
+			const bool stillRunning = std::find(running.begin(), running.end(), item.groupKey) != running.end();
+			if (!stillRunning) {
+				destroyItemNode(item);
+				items.erase(items.begin() + i);
+				structural = true;
+			}
+		}
+
+		// 2) 新出现的、没被固定的运行分组 → 补临时图标（就地造节点）
+		for (const auto& g : tracker.groups()) {
+			if (!g.running()) continue;
+			if (std::find(pinned.begin(), pinned.end(), g.key) != pinned.end()) continue;
+			bool exists = false;
+			for (const auto& item : items) {
+				if (item.temporary && item.groupKey == g.key) { exists = true; break; }
+			}
+			if (exists) continue;
+
+			DockItem item;
+			item.path = g.exePath;              // UWP 可能为空
+			item.name = g.displayName.empty() ? L"应用" : g.displayName;
+			item.temporary = true;
+			item.groupKey = g.key;
+
+			// 造型树上的节点。图标按峰值尺寸取（和固定项同一套规则）。
+			auto* node = row->makeChild<IconNode>();
+			node->setSize(cfgIconBase, cfgIconBase);
+			node->setTemporary(true);
+			item.node = node;
+
+			auto* dot = body->makeChild<IndicatorNode>();
+			dot->setPositionType(Ling::Position::Absolute);
+			dot->setSize(kIndicatorDia, kIndicatorDia);
+			dot->setOn(false);
+			item.indicator = dot;
+
+			// ⚠ 节点造完必须立刻加载位图，否则新临时图标是个空白方块
+			//   （loadIcons() 只在 create/rebuild 里跑，这里走的是增量路径）。
+			if (auto* ctx = Ling::D2D::get()->deviceContext.Get(); ctx && !item.path.empty()) {
+				const int targetPx = static_cast<int>(std::lround(px(cfgIconBase) * cfgHoverPeak));
+				node->setBitmap(loadShellIcon(ctx, item.path, targetPx));
+			}
+
+			items.push_back(std::move(item));
+			structural = true;
+		}
+
+		const bool runningChanged = (running != lastRunningKeys);
+		lastRunningKeys = running;
+
+		if (structural) {
+			// 项数变了 → 面板宽度变 → 窗口尺寸/位置/间距全要重算。
+			// 不去动 Config，只是把内存里的 items 重新映射到布局。
+			relayoutForItemCount();
+		}
+
+		// 结构没变（或已重排完）都要刷运行态
+		for (auto& item : items) {
+			if (!item.node) continue;
+			if (item.temporary) {
+				item.node->setTemporary(true);
+				item.node->setRunning(true);
+			}
+			else {
+				const AppGroup* g = groupOfItem(static_cast<size_t>(&item - items.data()));
+				item.node->setRunning(g && g->running());
+			}
+		}
+		refreshIndicators();
+
+		if (runningChanged || structural) {
+			int tempCount = 0;
+			for (const auto& it : items) { if (it.temporary) ++tempCount; }
+			log(std::format(L"[dock] 分组变化：运行 {} 组，Dock 共 {} 项（其中临时 {}）{}{}",
+				running.size(), items.size(), tempCount,
+				structural ? L"，已重排布局" : L"",
+				runningChanged ? L"（运行集合变化）" : L""));
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 删掉一项的节点（图标 + 指示器）。项数变化时调用。
+	// ---------------------------------------------------------------------------
+	void DockWin::destroyItemNode(DockItem& item)
+	{
+		// Ling 的节点由父节点持有，removeChild 会销毁它
+		if (item.indicator && body) body->removeChild(item.indicator);
+		if (item.node && row) row->removeChild(item.node);
+		item.node = nullptr;
+		item.indicator = nullptr;
+	}
+
+	// ---------------------------------------------------------------------------
+	// 项数变化后重排：重算每个图标的间距、面板宽度、窗口尺寸与位置。
+	//
+	// ⚠ 复用 onCreated 的布局规则，但**不销毁节点** —— 只更新已有节点的
+	//   尺寸/边距，再 layout 一次。新加的临时图标已经在 row 里了（Flex 行）。
+	// ---------------------------------------------------------------------------
+	void DockWin::relayoutForItemCount()
+	{
+		// row 是 Flex 行；间距是每个节点的 marginRight。项数变了要重设一遍：
+		// 除最后一项外都要有间距。
+		for (size_t i = 0; i < items.size(); ++i) {
+			auto* node = items[i].node;
+			if (!node) continue;
+			node->setSize(cfgIconBase, cfgIconBase);
+			node->setMarginRight((i + 1 < items.size()) ? cfgIconGap : 0.f);
+		}
+
+		// 面板 / 行 / 窗口尺寸随项数变
+		panel->setPosition(Ling::Edge::Left, kSideSlack);
+		panel->setSize(panelW(), panelH());
+		row->setSize(iconsW(), cfgIconBase);
+
+		const float winW = panelW() + 2 * kSideSlack;
+		const float winH = kHaloH + panelH();
+
+		// 窗口尺寸变化的**同时**要把位置摆回"水平居中、贴底"，
+		// 否则窗口会以左下角为锚、越来越靠右。
+		RECT work{};
+		SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+		const float oldH = h;   // setSize 会改 h
+		setSize(winW, winH);
+		const int panelWpx = static_cast<int>(px(panelW()));
+		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
+		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
+		(void)oldH;
+		setPosition(panelLeft - static_cast<int>(px(kSideSlack)),
+			panelBottom - static_cast<int>(h));
+
+		layout();
+		updateHitRegion();
+		placeIndicators();
+		refresh();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 只刷指示器（亮/灭 + 前台高亮），不动结构。
+	// ---------------------------------------------------------------------------
+	void DockWin::refreshIndicators()
+	{
+		for (size_t i = 0; i < items.size(); ++i) {
+			auto& item = items[i];
+			if (!item.indicator) continue;
+			const AppGroup* g = groupOfItem(i);
+			const bool running = item.temporary || (g && g->running());
+			item.indicator->setOn(running);
+			if (running) {
+				// 前台应用用满色强调色，后台运行用半透明同色系。
+				// ⚠ 别调太暗：指示器只有 4px，面板底色又是深灰，太暗了根本看不见
+				//   （第一版用 0x99 试过，截图里几乎辨认不出）。
+				const bool fg = g && g->isForeground();
+				item.indicator->setColor(fg ? 0xFF4CC2FF : 0xDD4CC2FF);
+			}
+			if (item.node) item.node->setRunning(running);
+		}
+		placeIndicators();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 指示器定位：图标正下方居中的 4px 圆点。
+	// ⚠ 必须在 layout 之后调 —— 图标坐标是 Flex 算出来的，布局前是 0。
+	// ---------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------
+	// 指示器定位：图标正下方居中的 4px 圆点。
+	//
+	// ⚠ 两个坑，都踩过：
+	//  1) **坐标系**：Ling 的 Node::x/y 是**绝对坐标**（相对窗口客户区），不是
+	//     相对父节点 —— 实测 row->x == row 里第一个 IconNode->x == 77。
+	//     所以直接用 item.node->x/y 就行，别再叠加 row 的偏移。
+	//  2) **单位**：node->x/y/w/h 是**物理像素**（yoga 输出已经乘过 dpi），
+	//     而 setPosition / setSize 内部会**再乘一次 dpi**（见 Ling Node.cpp）。
+	//     所以这里要给 setPosition 喂**逻辑像素** = 物理值 / dpi。
+	//     第一版把物理值直接喂进去，位置被放大 1.24 倍跑到窗口外，看着像"没画"。
+	// ⚠ 必须在 layout 之后调 —— 图标坐标是 Flex 算出来的，布局前是 0。
+	// ---------------------------------------------------------------------------
+	void DockWin::placeIndicators()
+	{
+		static const bool verbose = [] {
+			wchar_t buf[8]{};
+			return GetEnvironmentVariableW(L"ZDOCK_VERBOSE_IND", buf, 8) > 0;
+			}();
+		const float d = (dpi > 0.f) ? dpi : 1.f;
+		for (size_t i = 0; i < items.size(); ++i) {
+			auto& item = items[i];
+			if (!item.indicator || !item.node) continue;
+			// 物理像素 → 逻辑像素
+			const float cxLog = (item.node->x + item.node->w * 0.5f) / d;
+			const float yLog = (item.node->y + item.node->h) / d + kIndicatorGap;
+			item.indicator->setPosition(Ling::Edge::Left, cxLog - kIndicatorDia * 0.5f);
+			item.indicator->setPosition(Ling::Edge::Top, yLog);
+			if (verbose) {
+				log(std::format(L"[ind] #{} node物理=({:.1f},{:.1f},{:.1f},{:.1f}) -> dot逻辑=({:.1f},{:.1f}) 面板逻辑=({:.1f},{:.1f},{:.1f},{:.1f})",
+					i, item.node->x, item.node->y, item.node->w, item.node->h,
+					cxLog - kIndicatorDia * 0.5f, yLog,
+					panel->x / d, panel->y / d, panel->w / d, panel->h / d));
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 点图标：
+	//   有窗口在跑 → 切到那个应用（多窗口时给列表菜单，让用户挑）
+	//   没在跑       → 启动它
+	//   UWP 临时图标没有 exe 路径 → 只能切窗口，启动它得走 shell:AppsFolder
+	// ---------------------------------------------------------------------------
+	void DockWin::clickItem(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+
+		const AppGroup* g = groupOfItem(static_cast<size_t>(index));
+
+		if (g && g->running()) {
+			if (g->windows.size() == 1) {
+				WindowTracker::activateWindow(g->windows[0]);
+			}
+			else {
+				showWindowListMenu(index);
+			}
+		}
+		else if (!items[index].temporary) {
+			launch(index);
+		}
+		else {
+			log(std::format(L"[dock] 临时图标 {} 没有可执行的启动路径（UWP 暂不支持启动）", items[index].name));
+		}
+
+		hoverIndex = -1;
+		applyHover(-1);
+		ensureHoverTimer(false);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 多窗口分组的窗口列表：每行是一个窗口标题，右键可以关它。
+	// ⚠ 命令 id 从 200 起编号，避免和固定菜单项冲突。
+	// ---------------------------------------------------------------------------
+	void DockWin::showWindowListMenu(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+		const AppGroup* g = groupOfItem(static_cast<size_t>(index));
+		if (!g || g->windows.empty()) return;
+
+		constexpr UINT kBase = 200;   // 窗口行的命令 id 基址
+
+		HMENU menu = CreatePopupMenu();
+		if (!menu) return;
+		AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, g->displayName.c_str());
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		for (size_t i = 0; i < g->windows.size(); ++i) {
+			const HWND wh = g->windows[i];
+			auto it = [&] {
+				// 标题可能带 & 会被当成助记符，转义掉
+				std::wstring t;
+				const int n = GetWindowTextLengthW(wh);
+				if (n > 0) {
+					t.resize(static_cast<size_t>(n) + 1, L'\0');
+					const int got = GetWindowTextW(wh, t.data(), n + 1);
+					t.resize(static_cast<size_t>(std::max(0, got)));
+				}
+				if (t.empty()) t = L"(无标题窗口)";
+				std::wstring esc;
+				esc.reserve(t.size() + 4);
+				for (wchar_t c : t) { if (c == L'&') esc += L"&&"; else esc += c; }
+				return esc;
+				}();
+			AppendMenuW(menu, MF_STRING, kBase + static_cast<UINT>(i), it.c_str());
+		}
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(menu, MF_STRING, kMenuCloseGroup, L"关闭全部窗口");
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(menu, MF_STRING, kMenuPin, items[index].temporary ? L"固定到 Dock" : L"已在 Dock 中（固定项）");
+		if (!items[index].temporary) {
+			// 已固定的项把"固定"这条置灰
+			EnableMenuItem(menu, kMenuPin, MF_BYCOMMAND | MF_GRAYED);
+		}
+
+		POINT pt{};
+		GetCursorPos(&pt);
+		const UINT cmd = popupMenuHere(menu, pt);
+		if (cmd == 0) return;
+
+		if (cmd == kMenuPin) { pinItem(index); return; }
+
+		// 重新取一次分组 —— 菜单期间可能已经有窗口关了，下标会错位
+		const AppGroup* g2 = groupOfItem(static_cast<size_t>(index));
+		if (!g2) return;
+
+		if (cmd == kMenuCloseGroup) {
+			// 关全部：先拷一份 hwnd 列表，避免关闭过程中分组被改
+			const std::vector<HWND> wins = g2->windows;
+			log(std::format(L"[dock] 关闭分组 {} 的全部 {} 个窗口", g2->displayName, wins.size()));
+			for (HWND wh : wins) closeWindow(wh);
+			return;
+		}
+
+		if (cmd >= kBase) {
+			const size_t i = cmd - kBase;
+			if (i < g2->windows.size()) {
+				WindowTracker::activateWindow(g2->windows[i]);
+			}
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 把临时图标固定下来：写进 config.json（从"运行时自动出现"变成"用户固定"）。
+	// 之后重建界面，这个图标就变成固定项了。
+	// ---------------------------------------------------------------------------
+	void DockWin::pinItem(int index)
+	{
+		if (index < 0 || index >= static_cast<int>(items.size())) return;
+		auto& item = items[index];
+		if (!item.temporary) return;
+		if (item.path.empty()) {
+			log(L"[dock] 该应用没有 exe 路径（UWP），暂不支持固定");
+			return;
+		}
+
+		auto* cfg = Config::get();
+		for (const auto& it : cfg->items) {
+			if (_wcsicmp(it.path.c_str(), item.path.c_str()) == 0) return;   // 已经在里面
+		}
+
+		const auto backup = cfg->items;
+		cfg->items.push_back(ItemConfig{ item.path, item.name });
+		if (!cfg->save()) {
+			cfg->items = backup;
+			log(L"[dock] 固定图标写盘失败，已回退");
+			return;
+		}
+		log(std::format(L"[dock] 已固定 {}", item.path));
+		rebuild();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 关窗口：先 WM_CLOSE（给程序机会提示保存），不立刻强杀。
+	// ⚠ 不做 SendMessageTimeout 轮询等待 —— 那会把 dock 的 UI 线程卡住。
+	//   程序不响应就让它留着，用户可以再点一次或在任务栏处理。
+	// ---------------------------------------------------------------------------
+	void DockWin::closeWindow(HWND hwnd)
+	{
+		if (!hwnd || !IsWindow(hwnd)) return;
+		PostMessageW(hwnd, WM_CLOSE, 0, 0);
 	}
 
 	LRESULT DockWin::onHitTest(const POINT pos)
