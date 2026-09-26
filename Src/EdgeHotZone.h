@@ -47,23 +47,8 @@ namespace zdock {
 		/// <summary>鼠标进入热区时回调（宿主据此滑入 dock）。</summary>
 		std::function<void()> onEnter;
 
-		/// <summary>
-		/// **仅自动化测试用**的注入通道：收到约定的私有消息时回调，参数 = 全屏状态。
-		///
-		/// ⚠ 为什么需要它：全屏让位这条链路的真值来自 `GetForegroundWindow()`，
-		///   而要让一个窗口真变成前台，测试脚本就必须 `SetForegroundWindow`
-		///   —— 那会**抢走用户的输入焦点**（本工作区明确禁止：用户的
-		///   WorkBuddy 对话会因此被打断）。所以留一条"注入"通道，让探针用
-		///   `PostMessage` 直接驱动宿主，完全不碰焦点。
-		///   正常运行时没有任何代码会发这条消息，等于零影响。
-		/// </summary>
-		std::function<void(bool)> onTestInject;
-
 		/// <summary>日志回调（复用宿主的 Log）。</summary>
 		std::function<void(const std::wstring&)> onLog;
-
-		/// <summary>测试注入用的消息号（探针 PostMessage 时用）。</summary>
-		static constexpr UINT kMsgTestInject = WM_APP + 100;
 
 	private:
 		static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);

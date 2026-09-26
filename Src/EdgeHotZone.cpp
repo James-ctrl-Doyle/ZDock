@@ -108,14 +108,6 @@ namespace zdock {
 			self->entered = false;
 			return 0;
 
-		case EdgeHotZone::kMsgTestInject:
-			// 自动化测试专用：探针用 PostMessage 直接注入"全屏状态"，
-			// 绕开 SetForegroundWindow（那会抢用户的输入焦点）。
-			// 正常运行时没有任何代码会发这条消息。
-			self->log(std::format(L"[hotzone] 测试注入：全屏状态 -> {}", wp ? 1 : 0));
-			if (self->onTestInject) self->onTestInject(wp != 0);
-			return 0;
-
 		case WM_NCHITTEST:
 			// 热区必须可命中（HTCLIENT），否则收不到鼠标消息。
 			return HTCLIENT;

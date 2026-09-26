@@ -101,6 +101,37 @@ namespace zdock {
 		/// </summary>
 		std::function<void()> onTaskbarCreated;
 
+		/// <summary>
+		/// 显示环境变化时回调：分辨率 / 色深 / 主屏切换（`WM_DISPLAYCHANGE`），
+		/// 或系统度量变化（`WM_SETTINGCHANGE` 里的工作区、窗口度量、显示相关项）。
+		///
+		/// ⚠ 这两条都是**广播给顶层窗口**的消息，Ling 的 WinBase 不暴露消息口，
+		///   所以和 `TaskbarCreated` 一样借这个接收窗口收。
+		///
+		/// ⚠ DPI 变化**不走这里** —— `WM_DPICHANGED` 是发给"被移动/受影响的那个顶层窗口"的，
+		///   广播不到我们；Ling 已经处理了它（`WinBase::dpiChange` + `onDpiChanged` 事件），
+		///   DockWin 订阅那个事件即可。
+		/// </summary>
+		std::function<void()> onDisplayChanged;
+
+		/// <summary>
+		/// **仅自动化测试用**的注入通道：收到 `kMsgTestInject` 时回调，参数 = 全屏状态。
+		///
+		/// ⚠ 为什么需要它：全屏让位这条链路的真值来自 `GetForegroundWindow()`，
+		///   要造一个真全屏前台窗口就得 `SetForegroundWindow` —— 那会抢走用户的
+		///   输入焦点（本工作区明确禁止）。所以留一条注入通道让探针用 `PostMessage`
+		///   直接驱动，完全不碰焦点。正常运行时没有任何代码会发这条消息。
+		///
+		/// ⚠ 载体选这里（而不是热区窗口）：接收窗口是**常驻**的，
+		///   而热区会随 `autoHide` 开关创建/销毁 —— 一旦热区没了，
+		///   注入通道就断了（踩过：全屏让位与自动隐藏解耦后，
+		///   "不自动隐藏但要全屏让位"的组合下根本没有热区可投）。
+		/// </summary>
+		std::function<void(bool)> onTestInject;
+
+		/// <summary>测试注入用的消息号（探针 PostMessage 时用）。</summary>
+		static constexpr UINT kMsgTestInject = WM_APP + 100;
+
 		/// <summary>当前是否有全屏应用在前台。</summary>
 		bool fullscreenActive() const { return fullscreen; }
 

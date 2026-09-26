@@ -53,6 +53,7 @@ u32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 u32.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
 u32.GetWindowLongPtrW.restype = ctypes.c_longlong
 u32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+u32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 u32.EnumWindows.argtypes = [ctypes.c_void_p, wt.LPARAM]
 u32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
 u32.SystemParametersInfoW.argtypes = [wt.UINT, wt.UINT, ctypes.c_void_p, wt.UINT]
@@ -198,8 +199,8 @@ def probe_shell_stale():
     return eaten
 
 
-def find_windows(pid=None, class_name=None, visible_only=True):
-    """按 pid / 类名枚举顶层窗口，返回 [(hwnd, cls, rect)]。"""
+def find_windows(pid=None, class_name=None, title=None, visible_only=True):
+    """按 pid / 类名 / 标题枚举顶层窗口，返回 [(hwnd, cls, rect)]。"""
     found = []
 
     def cb(hwnd, lp):
@@ -214,6 +215,11 @@ def find_windows(pid=None, class_name=None, visible_only=True):
         cls = buf.value
         if class_name is not None and cls != class_name:
             return True
+        if title is not None:
+            t = ctypes.create_unicode_buffer(256)
+            u32.GetWindowTextW(hwnd, t, 256)
+            if t.value != title:
+                return True
         r = wt.RECT()
         u32.GetWindowRect(hwnd, ctypes.byref(r))
         found.append((hwnd, cls, (r.left, r.top, r.right, r.bottom)))
@@ -563,24 +569,28 @@ def case_fullscreen():
         return
     check('E ZDock 启动', True, 'pid=%s' % proc.pid)
 
-    hz = find_windows(pid=proc.pid, class_name='ZDock.EdgeHotZone')
-    if not hz:
-        check('E 热区窗口存在（注入通道就绪）', False)
+    # 注入载体 = 跟踪器那个**常驻**的 0x0 隐藏接收窗口（标题 ZDockTrack）。
+    # ⚠ 以前挂在热区窗口上，但热区会随 autoHide 开关创建/销毁 ——
+    #   全屏让位与自动隐藏解耦后，"不自动隐藏但要让位"的组合下根本没有热区。
+    # 它不可见，所以 visible_only=False。
+    tk = find_windows(pid=proc.pid, title='ZDockTrack', visible_only=False)
+    if not tk:
+        check('E 注入载体（跟踪器接收窗口）就绪', False)
         kill(proc)
         shutil.rmtree(d, ignore_errors=True)
         return
-    hzhwnd = hz[0][0]
-    check('E 热区窗口存在（注入通道就绪）', True)
+    inject_hwnd = tk[0][0]
+    check('E 注入载体（跟踪器接收窗口）就绪', True, 'hwnd=%d' % inject_hwnd)
 
     rect0 = dock_rect(proc.pid)
     check('E 起点：dock 处于展开态', rect0 is not None)
     if not rect0:
         kill(proc); shutil.rmtree(d, ignore_errors=True); return
-    mon = monitor_rect_of(hzhwnd)
+    mon = monitor_rect_of(inject_hwnd)
 
     # ---- 进入"全屏" → dock 应当滑出屏幕 ----
     before = len(read_log(d))
-    u32.PostMessageW(hzhwnd, MSG_TEST_INJECT, 1, 0)
+    u32.PostMessageW(inject_hwnd, MSG_TEST_INJECT, 1, 0)
     time.sleep(1.2)     # 滑出 300ms + 余量
     new = read_log(d)[before:]
     check('E 全屏进入：日志有 [dock] 全屏应用 进入',
@@ -611,7 +621,7 @@ def case_fullscreen():
 
     # ---- 退出"全屏" → dock 应当滑回来 ----
     before = len(read_log(d))
-    u32.PostMessageW(hzhwnd, MSG_TEST_INJECT, 0, 0)
+    u32.PostMessageW(inject_hwnd, MSG_TEST_INJECT, 0, 0)
     time.sleep(0.35)    # 只等滑入动画（200ms）+ 一点余量：
                         # ⚠ 等太久的话，滑入结束后的"鼠标不在 dock 上 → 自动收回"
                         #   会把它收回去，这时再断言"在屏幕内"就是错的

@@ -5,9 +5,15 @@
 #
 # Ling 静态库来源（按优先级）：
 #   1) $LING_ROOT
-#   2) ../Ling/dist/ling-v1.3.0-x64      —— Ling 仓库打出来的发布包（含 include/ + x64/Release）
+#   2) ../Ling/dist/ling-v1.3.1-x64      —— Ling 仓库打出来的发布包（含 include/ + x64/Release）
 #   3) ../Ling                            —— Ling 源码树（布局与发布包一致）
 #   LING_FROM_SOURCE=1 强制走源码树。
+#
+# ⚠ v1.3.1 修的是 `App::appID` 按 exe 路径哈希（此前是编译期常量，导致链接同一份
+#   库的程序互相误判"第二实例"，见 notes/2026-09-26-ZDock两个bug的根因取证与修复.md）。
+#   那是 .cpp 内的行为改动，**头文件接口没变**，所以升级只改下面这个路径即可。
+#   ZDock 自己的 `Src/SingleInstance.*`（命名 mutex）继续保留 —— 它比 Ling 的判定更早
+#   占位，两层都在才稳。
 #
 # ⚠ 运行时库必须与 Ling 一致 = /MT（静态 CRT）。Ling 与 ZPin 都是 MultiThreaded，
 #   这里用 /MD 会在链接期报 LNK2038 运行库不匹配。
@@ -19,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${LING_FROM_SOURCE:-0}" = "1" ]; then
     LING_ROOT="$ROOT/../Ling"
 else
-    LING_ROOT="${LING_ROOT:-$ROOT/../Ling/dist/ling-v1.3.0-x64}"
+    LING_ROOT="${LING_ROOT:-$ROOT/../Ling/dist/ling-v1.3.1-x64}"
     [ -d "$LING_ROOT/include" ] || LING_ROOT="$ROOT/../Ling"
 fi
 [ -d "$LING_ROOT/include" ] || { echo "找不到 Ling（试过 $LING_ROOT）" >&2; exit 1; }

@@ -64,6 +64,7 @@ namespace zdock {
 		static constexpr int   kTimerHover = 1;     // 判定"鼠标已移出"的兜底定时器
 		static constexpr int   kTimerAutoHide = 2;  // 自动隐藏延迟 / 滑动补间（阶段四）
 		static constexpr int   kTimerSlide = 3;     // 滑动动画补间（阶段四）
+		static constexpr int   kTimerRelayout = 4;  // 显示环境变化后的重排（延迟一拍，见下）
 		static constexpr int   kMenuExit = 101;
 		static constexpr int   kMenuOpen = 102;
 		static constexpr int   kMenuOpenAdmin = 103;
@@ -187,6 +188,15 @@ namespace zdock {
 		/// 内部会调 setSize/setPosition（都是物理像素，不乘 dpi）。
 		/// </summary>
 		void applyDockPlacement(int offsetY = 0);
+
+		/// <summary>把窗口摆到"完全滑出屏幕"的隐藏位（顶边 = 屏幕底边）。</summary>
+		void applyDockPlacementHidden();
+
+		/// <summary>
+		/// 显示环境变化（DPI / 分辨率 / 主屏切换）后的重排：按新 dpi 与监视器
+		/// 重算尺寸位置，并把热区、AppBar 一起带过去。保持当前的显示/隐藏状态。
+		/// </summary>
+		void relayoutForEnvironment();
 
 		// ---- 自动隐藏状态机 ----
 

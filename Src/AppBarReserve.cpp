@@ -127,7 +127,8 @@ namespace zdock {
 		abd.cbSize = sizeof(abd);
 		abd.hWnd = h;
 		abd.uCallbackMessage = RegisterWindowMessageW(L"ZDockAppBarPurgeNotify");
-		const BOOL okNew = SHAppBarMessage(ABM_NEW, &abd);
+		// ⚠ SHAppBarMessage 返回 UINT_PTR，别塞进 BOOL（C4244，可能丢数据）
+		const UINT_PTR okNew = SHAppBarMessage(ABM_NEW, &abd);
 
 		APPBARDATA empty{};
 		empty.cbSize = sizeof(empty);

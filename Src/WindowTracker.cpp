@@ -559,6 +559,51 @@ namespace zdock {
 			return 0;
 		}
 
+		// 自动化测试注入（仅测试用，正常运行时没有任何代码会发这条消息）。
+		// 借常驻的接收窗口做载体 —— 热区会随 autoHide 开关销毁，靠不住。
+		if (msg == kMsgTestInject) {
+			self->log(std::format(L"[track] 测试注入：全屏状态 -> {}", wp ? 1 : 0));
+			if (self->onTestInject) self->onTestInject(wp != 0);
+			return 0;
+		}
+
+		// 显示环境变化（分辨率 / 色深 / 主屏切换）。
+		// ⚠ 这条是**广播**，只发给顶层窗口 —— 我们这个 0x0 隐藏窗口是顶层（parent=0），
+		//   所以收得到；Ling 的 dock 主窗口收不到（不暴露消息口）。
+		//   参数：wParam = 色深(bpp)，lParam 低字 = 宽、高字 = 高（**整数**，
+		//   不是指针 —— 所以这条可以安全地被跨进程投递，测试就靠它）。
+		if (msg == WM_DISPLAYCHANGE) {
+			self->log(std::format(L"[track] 显示器参数变化：{}x{} {}bpp",
+				LOWORD(lp), HIWORD(lp), static_cast<UINT>(wp)));
+			if (self->onDisplayChanged) self->onDisplayChanged();
+			return 0;
+		}
+
+		// 系统度量变化。⚠ 这条**非常频繁**（任何设置变化都会广播），必须按 lParam
+		// 指明的项目过滤，否则等于给自己造了个高频回调。
+		//   只认这三类："WorkArea"（工作区）、"WindowMetrics"（窗口度量/DPI 相关）、
+		//   "Display"（显示相关）。
+		//
+		// ⚠⚠ lParam 是一个**字符串指针**（也可能为 nullptr，表示"很多设置变了"）。
+		//   系统自己发的消息里它总是有效的；但这条消息是**广播**，任何人都能往我们
+		//   窗口上投 —— 跨进程投进来的 lParam 指向的是**对方进程**的地址，
+		//   直接 wcscmp 就是读野指针（轻则乱判，重则崩）。
+		//   所以先做一次可读性检查再解引用。
+		//   （实测踩过：探针跨进程投 WM_SETTINGCHANGE 就是为了验证这条路径。）
+		if (msg == WM_SETTINGCHANGE) {
+			const wchar_t* area = reinterpret_cast<const wchar_t*>(lp);
+			if (area == nullptr) return 0;                     // nullptr = "多项变化"，不细分
+			if (IsBadStringPtrW(area, 64)) return 0;           // 不可读（跨进程野指针）→ 忽略
+			const bool relevant = (wcscmp(area, L"WorkArea") == 0
+				|| wcscmp(area, L"WindowMetrics") == 0
+				|| wcscmp(area, L"Display") == 0);
+			if (relevant) {
+				self->log(std::format(L"[track] 系统度量变化：{}", area));
+				if (self->onDisplayChanged) self->onDisplayChanged();
+			}
+			return 0;
+		}
+
 		if (msg == self->shellHookMsg) {
 			// ⚠ 参数语义（容易记反）：
 			//   wParam = 事件码（HSHELL_*），lParam = 窗口句柄

@@ -4,6 +4,82 @@
 
 让 Dock 学会"让开"：没人用的时候滑出屏幕，有人碰屏幕边缘再滑回来；
 可以选择向系统申请一块工作区，让最大化窗口避开它。
+本版同时把依赖升到 **Ling v1.3.1**，并修掉了三处缺陷（见文末"本版修复"）。
+
+### 依赖升级：Ling v1.3.0 → v1.3.1
+
+v1.3.1 修的是 `App::appID` 改为按 **exe 完整路径**做 FNV-1a 哈希 ——
+此前它是**编译期常量**、固化在 `Ling.lib` 里，导致链接同一份库的程序 appID 相同，
+互相把对方判成"第二实例"（详见 `notes/2026-09-26-ZDock两个bug的根因取证与修复.md`）。
+
+升级只改了 `build-support/build.sh` 里的 dist 路径 —— **头文件接口没变**，
+改动全在 `.cpp` 内。ZDock 自己的 `Src/SingleInstance.*`（命名 mutex）保留不动：
+它比 Ling 的判定更早占位，两层都在才稳。
+
+**运行期实测**（新工具 `build-support/_probe_ling_appid.sh` + `_probe_ling_appid.cpp`，
+把同一份 exe 放两个不同目录跑，读 `Ling::App::appID`）：
+
+| Ling 包 | 目录 A | 目录 B | 结论 |
+|---|---|---|---|
+| v1.2.0 | `Ling_Tf9sqM` | `Ling_Tf9sqM` | 相同 → 旧行为（编译期常量） |
+| **v1.3.1** | `Ling_2534E9F3804D` | `Ling_9B5D4D1B7594` | **不同 → 修复生效** |
+
+> ⚠️ 顺带查明一个 Ling 仓库的坑：`dist/ling-v1.3.0-x64/` 里的 `Ling.lib`
+> 时间戳是 16:17，而它的 `VERSION.txt` 记的是 04:10 —— **该包被重建后覆盖过**，
+> 名义 v1.3.0、实际已含修复。所以拿它当"旧版对照"是得不到旧行为的
+> （实测它和 v1.3.1 表现一致），必须退到 v1.2.0 才看得到差异。
+
+### 新增：显示环境变化自适应（`WindowTracker::onDisplayChanged` + `DockWin::relayoutForEnvironment`）
+
+此前"换显示器 / 改分辨率 / 改缩放比"之后 dock 不会重新定位 —— 会错位或尺寸不对。
+现在两条触发源汇到一处重排：
+
+- **`WM_DISPLAYCHANGE`**（分辨率 / 色深 / 主屏切换）+ **`WM_SETTINGCHANGE`**
+  （只认 `WorkArea` / `WindowMetrics` / `Display` 三类，否则这条高频广播等于轮询）
+  → 借跟踪器那个 0x0 隐藏**顶层**窗口收（广播只发顶层窗口，Ling 不暴露消息口）；
+- **`WM_DPICHANGED`** → Ling 已经处理（`WinBase::dpiChange` + `onDpiChanged` 事件），
+  此前 **ZDock 一行都没订阅**，等于失效。
+
+⚠ 两个实现要点（都踩过）：
+
+1. **重排要延后一拍**（挂 1ms 一次性定时器）。Ling 的 `dpiChange()` 是
+   「先 `onDpiChanged()` 回调、**之后**才 `SetWindowPos(系统建议矩形)`」——
+   在回调里设的位置会被它当场覆盖。而且那个"建议矩形"是按"原物理尺寸等比缩放"给的，
+   对内容自适应的 dock 是**错的**（会把 dock 推到屏幕中间）。
+2. **必须重算尺寸，不能只改位置**：`px()` 依赖 `dpi`，dpi 变了窗口物理尺寸也得跟着变，
+   否则 200% 缩放下图标只占一半大小。所以重排直接复用 `relayoutForItemCount()`。
+3. **隐藏态要保住**：重排内部是 `applyDockPlacement(0)`（展开态），
+   如果此刻 dock 正因自动隐藏/全屏让位而滑出屏幕，必须再推回屏幕外 ——
+   否则它会在全屏应用底下突然冒出来。
+
+### 修：全屏让位与自动隐藏**解耦**
+
+此前 `hideOnFullscreen` 偷偷依赖 `autoHide`：`shouldHideNow()` / `slideIn()` /
+`slideOut()` / `onFullscreenChanged()` 里都挂着 `if (!cfgAutoHide) return`，
+所以"不要自动隐藏、但要全屏时让位"这个组合根本做不到。
+
+现在滑动（`slideIn`/`slideOut`）是**动作**，不再被配置门控；配置门控只留在调用点
+（`scheduleHide` 管自动隐藏、`onFullscreenChanged` 管让位）。
+`shouldHideNow()` 只看 `hideOnFullscreen && fullscreenNow`。
+
+⚠ 连带改掉一处：`applyAutoHideConfig()` 在"关掉自动隐藏"时本来**无条件**把 dock 摆回
+展开态 —— 如果此刻正因全屏让位而隐藏，就会让 dock 从全屏画面底下冒出来。
+现在加了 `&& !shouldHideNow()` 条件。
+
+### 修：跨进程野指针消息的健壮性
+
+`WM_SETTINGCHANGE` 的 `lParam` 是**字符串指针**（`WM_DPICHANGED` 的是 RECT 指针）。
+系统自己发的消息里它总是有效的，但这条消息是**广播** —— 谁都可能往我们窗口上投，
+跨进程投进来的指针指向的是**对方进程**的地址，直接 `wcscmp` 就是读野指针。
+
+现在先做可读性检查（`IsBadStringPtrW`）再解引用。
+（实测就是这么发现问题的：探针跨进程投 `WM_SETTINGCHANGE` 试图验证那条路径。）
+
+### 测试工具改进
+
+阶段四的"全屏状态注入通道"从**热区窗口**迁到了**跟踪器的常驻接收窗口**：
+热区会随 `autoHide` 开关创建/销毁，靠不住 —— 全屏让位与自动隐藏解耦后，
+"不自动隐藏但要全屏让位"的组合下根本没有热区可投。
 
 ### 新增：`Src/EdgeHotZone.h/.cpp` —— 自动隐藏热区
 
@@ -72,7 +148,7 @@
 有全屏应用在前台时 dock 保持隐藏（可配 `hideOnFullscreen: false`）。
 `slideIn()` 里也拦了 `shouldHideNow()` —— 全屏期间碰热区也不会拱出全屏画面。
 
-### 修：两个 bug（症状一样，根因完全不同）
+### 修：定位基准自引用 + 死 AppBar 记录（症状一样，根因完全不同）
 
 1. **定位基准自引用** —— `dockRectShown()` 原本用 `SPI_GETWORKAREA` 当基准，
    而 AppBar 预留改的就是工作区 → 自引用反馈回路，工作区被抬一次 dock 位置就上爬一次。
@@ -81,6 +157,16 @@
    实测：单份占用从虚胖的 183px 回到 **95px**（= 面板高）。
    阶段一那条 `面板底边贴工作区底边` 的断言也跟着改成"贴屏幕底边"。
 2. **死 AppBar 记录叠加** —— 见上面的"强杀自愈"。
+
+### 本版修复一览
+
+| # | 问题 | 性质 | 修法 |
+|---|---|---|---|
+| 1 | 换显示器 / 改分辨率 / 改缩放比后 dock 错位、尺寸不对 | 功能缺陷 | 新增 `onDisplayChanged` + 订阅 Ling `onDpiChanged`，统一走 `relayoutForEnvironment()` |
+| 2 | 全屏让位偷偷依赖自动隐藏 | 功能缺陷 | 滑动动作与配置门控解耦；`shouldHideNow()` 只看 `hideOnFullscreen` |
+| 3 | 跨进程投来的 `WM_SETTINGCHANGE` 会读野指针 | 健壮性 | 解引用前先 `IsBadStringPtrW` |
+| 4 | 定位基准自引用（工作区被占两道，95px → 183px） | 功能缺陷 | dock/热区/滑出目标统一锚监视器 `rcMonitor` |
+| 5 | 强杀留下的死 AppBar 记录会叠加 | 系统限制 + 自愈 | 状态文件写回工作区 + 完整 NEW/SETPOS/REMOVE 循环清记录 |
 
 ### 测试
 
@@ -94,12 +180,25 @@
 | D | 广播 `TaskbarCreated` → 自愈完成、热区仍在、进程存活 |
 | E | 全屏让位全套（滑出 / 全屏期间不拱出 / 滑回 / 鼠标不在 dock 时自动收回） |
 
+`build-support/_probe_display_change.py`（**26/26 通过**，本版新增）：
+
+| 段 | 覆盖 |
+|---|---|
+| 1 | 投 `WM_DISPLAYCHANGE` → 收到广播 + 触发重排 + 重排后仍贴屏幕底、水平居中、尺寸未变 |
+| 2 | 跨进程投**带野指针**的 `WM_SETTINGCHANGE` / `WM_DPICHANGED` → 不崩、被防护挡住、位置未被破坏 |
+| 3 | 隐藏态（全屏让位滑出）下重排 → dock **不会**从屏幕底边冒出来 |
+| 4 | `autoHide=false` + `hideOnFullscreen=true` → 让位仍生效、退出后常驻、且无热区窗口 |
+
+`build-support/_probe_ling_appid.sh` + `_probe_ling_appid.cpp`（本版新增）：
+运行期读 `Ling::App::appID`，验证 v1.3.1 的"按 exe 路径哈希"。
+
 新增环境自检 `probe_shell_stale()`：干净工作区上注册 1px AppBar 看吃掉多少，
 > 20px 就说明有残留（探针会先扫一遍再测，避免"抬升多少"算错）。
 
 截图：`build/_review/stage4_1_展开态.png` / `stage4_2_隐藏态滑出.png` / `stage4_3_工作区预留.png`。
 
-回归：阶段一 **24/24**、阶段三 **13/13** 无退化。
+回归：阶段一 **24/24**、阶段三 **13/13**、配置 6/6、删除 5/5、跟踪 API 5/5、
+悬停抖动 **0.0%**（原 32.6%）无退化。
 
 ## 0.1.3 · 阶段三（窗口跟踪 / 运行指示 / 临时图标）— 2026-09-26
 

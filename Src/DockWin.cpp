@@ -133,6 +133,17 @@ namespace zdock {
 				tickSlide();
 				return;
 			}
+			if (id == kTimerRelayout) {
+				// 显示环境变化（DPI / 分辨率 / 主屏切换）后的重排。
+				// ⚠ 为什么要延后一拍、不直接在事件回调里做：
+				//   Ling 的 `WinBase::dpiChange()` 是「先 onDpiChanged() 回调、**之后**
+				//   才 SetWindowPos(系统建议矩形)」—— 在回调里设的位置会被它当场覆盖。
+				//   挂个 1ms 的一次性定时器，让重排落在那次 SetWindowPos 之后。
+				//   （一次性定时器不是轮询，红线 4 允许。）
+				killTimer(kTimerRelayout);
+				relayoutForEnvironment();
+				return;
+			}
 			if (id != kTimerHover) return;
 			if (hoverIndex < 0) {
 				ensureHoverTimer(false);
@@ -170,6 +181,23 @@ namespace zdock {
 
 		// 鼠标在面板上动 → 说明用户在用它，取消待执行的滑出（并滑入，如果还是隐藏态）。
 		onMouseMove.add([this](POINT) { keepVisible(); });
+
+		// DPI 变化（改系统缩放比、跨不同 DPI 的显示器）→ 重排。
+		// ⚠ 两件事都在这里发生，缺一不可：
+		//   1) Ling 已经更新了 `dpi` 与节点资源（WinBase::dpiChange 里先做）；
+		//   2) 但它的 `dpiChange()` 在回调**之后**还会 SetWindowPos(系统建议矩形)
+		//      —— 那个矩形是按"窗口原物理尺寸等比缩放"给的，对内容自适应的 dock
+		//      是错的（位置会被推到屏幕中间）。所以这里只挂一个 1ms 的一次性
+		//      定时器，把真正的重排推到那条 SetWindowPos 之后执行。
+		// ⚠ `px()` 依赖 `dpi`：dpi 变了，窗口尺寸也得重算，光改位置不够
+		//   （否则 200% 缩放下图标会只占一半大小）。
+		onDpiChanged.add([this] {
+			log(std::format(L"[dock] DPI 变化 -> {:.2f}", dpi));
+			setTimer(1, kTimerRelayout);
+			});
+		// 让探针能据日志确认这条订阅挂上了（DPI 变化的真实触发要改系统缩放，
+		// 自动化测试造不了；WM_DPICHANGED 的 lParam 是指针，跨进程投递无效）。
+		log(L"[dock] 已订阅 DPI 变化（Ling onDpiChanged）");
 
 		// 窗口没了就退进程：否则 DestroyWindow 之后消息循环还在空转，留一个
 		// "没窗口没托盘"的僵尸进程（ZPin 那边踩过同款）
@@ -742,6 +770,20 @@ namespace zdock {
 		// explorer 重启自愈（任务书 §2 #32）
 		tracker.onTaskbarCreated = [this] { onTaskbarCreated(); };
 
+		// 显示环境变化（分辨率 / 主屏切换 / 系统度量）→ 重排。
+		// ⚠ 这条是**广播**，靠跟踪器那个 0x0 隐藏顶层窗口收（Ling 不暴露消息口）。
+		//   DPI 变化走另一条路（Ling 的 onDpiChanged），见 create()。
+		tracker.onDisplayChanged = [this] {
+			// 也延后一拍：WM_DISPLAYCHANGE 之后系统还会继续调整（任务栏重排、
+			// 工作区刷新），立刻重排会算到中间态。
+			setTimer(1, kTimerRelayout);
+			};
+
+		// 自动化测试注入：探针 PostMessage 把"全屏状态"喂进来，
+		// 免得为了造一个真全屏前台窗口去 SetForegroundWindow（那会抢用户焦点）。
+		// 载体是跟踪器的常驻接收窗口（热区在 autoHide 关闭时不存在，靠不住）。
+		tracker.onTestInject = [this](bool on) { onFullscreenChanged(on); };
+
 		if (!tracker.start()) {
 			log(L"[dock] 窗口跟踪器启动失败，运行指示 / 临时图标不可用");
 			return;
@@ -1204,6 +1246,67 @@ namespace zdock {
 	}
 
 	// ---------------------------------------------------------------------------
+	// 把窗口摆到"完全滑出屏幕"的隐藏位（顶边 = 屏幕底边）。
+	// ⚠ 和 applyDockPlacement(h) 的区别：h 是窗口高（物理像素），把顶边放到
+	//   `shownOrigin.y + h`，那只是"刚好出屏"；用屏幕底边更稳（多出的 halo 也一起出去），
+	//   而且这正是 slideOut 补间的终点，两处保持一致。
+	// ---------------------------------------------------------------------------
+	void DockWin::applyDockPlacementHidden()
+	{
+		const RECT r = dockRectShown();
+		shownOrigin.x = r.left;
+		shownOrigin.y = r.top;
+		const RECT mon = monitorRect();
+		setPosition(r.left, mon.bottom);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 显示环境变化后的重排（任务书 §9.9：显示器 / DPI 变化要能自适应）。
+	//
+	// 触发源有两个，都汇到这里：
+	//   · `onDpiChanged`（Ling 自己的事件，WM_DPICHANGED）—— 改缩放比、跨屏拖动；
+	//   · `WindowTracker::onDisplayChanged`（WM_DISPLAYCHANGE / WM_SETTINGCHANGE）
+	//     —— 改分辨率、换主屏、显示设置变化。
+	//
+	// 要做的事：按**新的 dpi / 新的监视器**重算尺寸与位置，热区与 AppBar 也要跟着走。
+	// ⚠ 别只重算位置：`px()` 依赖 `dpi`，dpi 变了窗口尺寸也得重算，否则图标会
+	//   在大屏上显示成小尺寸（或者反过来）。
+	// ---------------------------------------------------------------------------
+	void DockWin::relayoutForEnvironment()
+	{
+		if (!hwnd) return;
+
+		const RECT mon = monitorRect();
+		log(std::format(L"[dock] 显示环境变化 -> 重排（dpi={:.2f} 监视器=({},{})-({},{})）",
+			dpi, mon.left, mon.top, mon.right, mon.bottom));
+
+		// ⚠ relayoutForItemCount 内部是 applyDockPlacement(0)，也就是**展开态**。
+		//   如果此刻 dock 是隐藏的（自动隐藏 / 全屏让位），必须再推回屏幕外，
+		//   否则它会突然从屏幕底边冒出来。
+		relayoutForItemCount();
+		if (slideState == SlideState::Hidden
+			|| (slideState == SlideState::Sliding && slideTo > 0.f)) {
+			// 隐藏态（或正在往隐藏走）：直接落位到终点，避免半路跳变
+			killTimer(kTimerSlide);
+			slideTimerOn = false;
+			slideState = SlideState::Hidden;
+			slideT = 1.f;
+			applyDockPlacementHidden();
+		}
+		else if (slideState == SlideState::Sliding) {
+			// 正在滑入：落位到展开态终点
+			killTimer(kTimerSlide);
+			slideTimerOn = false;
+			slideState = SlideState::Shown;
+			slideT = 0.f;
+		}
+
+		syncHotZone();
+		// AppBar 的批准矩形是**屏幕坐标**的，监视器变了必须重报一次
+		syncAppBar();
+	}
+
+	// ---------------------------------------------------------------------------
 	// 从配置刷新自动隐藏缓存 + 按需创建 / 销毁热区窗口。
 	// ---------------------------------------------------------------------------
 	void DockWin::applyAutoHideConfig()
@@ -1213,9 +1316,6 @@ namespace zdock {
 			keepVisible();
 			slideIn();
 			};
-		// 自动化测试注入：探针用 PostMessage 直接把"全屏状态"喂进来，
-		// 免得为了造一个真全屏前台窗口去 SetForegroundWindow（那会抢用户焦点）。
-		hotZone.onTestInject = [this](bool on) { onFullscreenChanged(on); };
 		hotZone.onLog = [](const std::wstring& s) { log(s); };
 
 		if (cfgAutoHide) {
@@ -1226,10 +1326,13 @@ namespace zdock {
 				cfgHideDelayMs, cfgSlideInMs, cfgSlideOutMs, cfgHideOnFullscreen ? 1 : 0));
 		}
 		else {
-			// 关掉自动隐藏要立刻回到展开态并销毁热区 ——
+			// 关掉自动隐藏要立刻销毁热区 ——
 			// 不销毁的话屏幕边上会留一条看不见却吃点击的窗口。
 			hotZone.destroy();
-			if (slideState != SlideState::Shown) {
+			// ⚠ 条件里必须有 `!shouldHideNow()`：如果此刻是**全屏让位**导致的隐藏
+			//   （hideOnFullscreen 开着、全屏应用在前台），dock 必须继续留在屏幕外。
+			//   早期版本无条件摆回展开态，会让全屏应用底下突然冒出一条 dock。
+			if (slideState != SlideState::Shown && !shouldHideNow()) {
 				slideState = SlideState::Shown;
 				slideT = 0.f;
 				applyDockPlacement(0);
@@ -1285,9 +1388,11 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	bool DockWin::shouldHideNow() const
 	{
-		if (!cfgAutoHide) return false;
-		if (cfgHideOnFullscreen && fullscreenNow) return true;
-		return false;
+		// ⚠ 这里**不**检查 cfgAutoHide：全屏让位（hideOnFullscreen）是独立开关，
+		//   用户可以"不要自动隐藏、但要全屏时让位"。
+		//   之前这里写成 `if (!cfgAutoHide) return false;`，等于让让位功能
+		//   偷偷依赖了自动隐藏 —— 关掉自动隐藏就一起失效了。
+		return cfgHideOnFullscreen && fullscreenNow;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1336,7 +1441,9 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::slideIn()
 	{
-		if (!cfgAutoHide || !hwnd) return;
+		// ⚠ 不检查 cfgAutoHide：滑动是**动作**，由调用方决定要不要调
+		//   （自动隐藏、全屏让位退出都会用），配置门控在各调用点。
+		if (!hwnd) return;
 		// ⚠ 全屏应用在前台时**保持隐藏**（任务书 §3："全屏应用前台 → 保持隐藏"）。
 		//   热区碰一下也要拦住 —— 否则全屏游戏/视频时鼠标扫过屏幕底边，
 		//   dock 会从全屏画面底下拱出来。
@@ -1363,7 +1470,8 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::slideOut()
 	{
-		if (!cfgAutoHide || !hwnd) return;
+		// ⚠ 同样不检查 cfgAutoHide（理由见 slideIn）。
+		if (!hwnd) return;
 		if (slideState == SlideState::Hidden && slideT >= 1.f) return;
 
 		RECT cur{};
@@ -1431,7 +1539,9 @@ namespace zdock {
 	{
 		fullscreenNow = on;
 		log(std::format(L"[dock] 全屏应用 {}", on ? L"进入" : L"退出"));
-		if (!cfgAutoHide) return;
+		// ⚠ 这里以前有一句 `if (!cfgAutoHide) return;` —— 那让"全屏让位"
+		//   偷偷依赖了自动隐藏。现在两者彻底解耦：只要 hideOnFullscreen 开着，
+		//   自动隐藏关着也照样让位。
 
 		// ⚠ 热区**不销毁**。理由：
 		//   1) 它已经全透明、不抢焦点、不进 Alt+Tab，全屏应用看不出来；

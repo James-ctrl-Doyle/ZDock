@@ -2,9 +2,9 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段四（AppBar 预留 / 自动隐藏 / 全屏让位）已完成**
-（阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项探针全 PASS；
-过程中挖出的 4 个 bug 已根因级修复，见 `CHANGELOG.md`）。
+当前进度：**阶段四（AppBar 预留 / 自动隐藏 / 全屏让位）已完成并发布 `v0.1.4`**
+（依赖 **Ling v1.3.1**；阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、
+显示环境 26 项探针全 PASS；过程中挖出的 5 个 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -42,6 +42,9 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
   死记录扫掉（**不扫掉的话再注册会叠加，工作区被占两道**），然后正常注册。详见下文。
 - **explorer 重启自愈**：监听 `RegisterWindowMessageW(L"TaskbarCreated")` 广播，
   重新注册 AppBar 与 shell hook（任务栏重建后协调关系会失效）。
+- **显示环境变化自适应**：换显示器 / 改分辨率 / 改缩放比之后自动重排（尺寸 + 位置 +
+  热区 + AppBar 一起走）。两条来源：`WM_DISPLAYCHANGE` / `WM_SETTINGCHANGE`
+  （借跟踪器的隐藏顶层窗口收广播）+ Ling 的 `onDpiChanged`。
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
 - 单实例：**自己命名的 mutex**（`Src/SingleInstance.*`）——
@@ -101,6 +104,24 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 `stage3_default.png` / `stage3_temp_icon.png` / `stage3_hover.png` / `stage3_menu_temp.png`（阶段三）、
 `stage4_1_展开态.png` / `stage4_2_隐藏态滑出.png` / `stage4_3_工作区预留.png`（阶段四）。
 
+### 显示环境变化（v0.1.4 新增，`_probe_display_change.py` **26/26**）
+
+| 覆盖 | 结果 |
+|---|---|
+| `WM_DISPLAYCHANGE` 广播 | 收到 + 触发重排 + 重排后仍贴屏幕底、水平居中、尺寸未变 |
+| 跨进程**野指针**消息 | 投带野指针的 `WM_SETTINGCHANGE` / `WM_DPICHANGED` → **不崩**、被防护挡住、位置未被破坏 |
+| 隐藏态遇重排 | 全屏让位滑出状态下重排 → dock **不会**从屏幕底边冒出来 |
+| 让位与自动隐藏解耦 | `autoHide=false` + `hideOnFullscreen=true` → 让位仍生效、退出后常驻、且没有多余热区窗口 |
+
+### 依赖升级验证（`_probe_ling_appid.sh`）
+
+把同一份探针 exe 放两个不同目录，运行期读 `Ling::App::appID`：
+
+| Ling 包 | 目录 A | 目录 B | 结论 |
+|---|---|---|---|
+| v1.2.0 | `Ling_Tf9sqM` | `Ling_Tf9sqM` | 相同 → 旧行为（编译期常量） |
+| **v1.3.1** | `Ling_2534E9F3804D` | `Ling_9B5D4D1B7594` | **不同 → 按 exe 路径哈希** |
+
 ## 配置
 
 exe 同目录的 `config.json`，首次启动自动生成。全部字段与默认值：
@@ -148,8 +169,8 @@ bash build-support/build.sh
 ```
 
 - 直接调 `cl.exe / link.exe / rc.exe`，**不走 MSBuild**（本机没有 .NET SDK，也不需要）。
-- Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-v1.3.0-x64`（发布包）→ `../Ling`（源码树）。
-  `LING_FROM_SOURCE=1` 强制用源码树。
+- Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-v1.3.1-x64`（发布包）→ `../Ling`（源码树）。
+  当前锁 **v1.3.1**（修了 `App::appID` 的编译期常量问题）。`LING_FROM_SOURCE=1` 强制用源码树。
 - 产物：`build/bin/ZDock.exe`（约 830 KB）。
 
 依赖的硬约定（踩过的坑，改构建脚本前先看 `build-support/build.sh` 里的注释）：
@@ -172,6 +193,8 @@ bash build-support/build.sh
 <python> build-support/_probe_track_api.py           # 阶段三最贵假设：跟踪 API 是否可用（5 项）
 <python> build-support/_probe_stage3.py              # 阶段三：跟踪/指示器/临时图标（13 项）
 <python> build-support/_probe_stage4.py              # 阶段四：自动隐藏/全屏让位/AppBar/自愈（48 项）
+<python> build-support/_probe_display_change.py       # 显示器/DPI 变化自适应 + 野指针健壮性（26 项）
+<python> build-support/_probe_ling_appid.sh           # 编出读 Ling::App::appID 的小工具（升级验证）
 <python> build-support/_probe_config.py              # config.json 生成/读值/兜底/不覆盖（6 项）
 <python> build-support/_probe_remove_item.py         # 删除与边界（含空 Dock）（5 项）
 <python> build-support/_probe_ui_remove.py           # 真实 UI 走一遍"从 Dock 移除"
@@ -217,10 +240,12 @@ bash build-support/build.sh
 Src/
   main.cpp            入口：DPI 感知 → 单实例 mutex → Ling::init → 建 DockWin → 消息循环
   DockWin.h/.cpp      主窗口：布局、图标行、悬停、命中区域（region）、菜单、重建、跟踪接线、
-                      自动隐藏状态机、全屏让位、AppBar 同步
+                      自动隐藏状态机、全屏让位、AppBar 同步、显示环境变化重排
   WindowTracker.h/.cpp  事件驱动窗口跟踪：shell hook + win event，分组 / 运行状态 / 全屏判定
                        + TaskbarCreated 广播（explorer 重启自愈）
-  EdgeHotZone.h/.cpp  自动隐藏热区：贴屏幕底边的 3px 全透明细窗（含测试注入通道）
+                       + WM_DISPLAYCHANGE / WM_SETTINGCHANGE 广播（显示环境变化）
+                       + 测试注入通道（WM_APP+100）
+  EdgeHotZone.h/.cpp  自动隐藏热区：贴屏幕底边的 3px 全透明细窗
   AppBarReserve.h/.cpp  工作区预留（AppBar）+ 强杀自愈 + 死记录清扫
   Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
   SingleInstance.h/.cpp  命名 mutex 单实例
@@ -231,8 +256,10 @@ Src/
   Res/Resource.rc     VERSIONINFO（版本号唯一来源）
 build-support/
   _msvc_env.sh        cl/link/rc 的最小环境
-  build.sh            构建脚本（含残留进程守卫）
+  build.sh            构建脚本（含残留进程守卫；Ling 版本锁定在这里）
   zdock_stage1_test.py, _probe_*.py, _shot_stage4.py   验证 / 诊断 / 截图
+  _probe_ling_appid.sh / .cpp    读 Ling::App::appID 的小工具（升级验证用）
+_review/              **交付产物**（本地，被 gitignore）—— 带版本号的 exe
 ```
 
 ## 关键设计说明
@@ -430,14 +457,45 @@ AppBar 的注销（`ABM_REMOVE`）是应用自己的责任，shell **不检查**
 2. `purgeStaleRecord()` 把 shell 里的死记录扫掉；
 3. 之后才正常注册 —— 功能不降级，工作区只占一份。
 
+### 显示环境变化：**Ling 的回调顺序**决定必须延后一拍
+
+`WM_DPICHANGED` 的处理链在 Ling 里是：
+
+```cpp
+// Ling/src/WinBase.cpp
+dpi = newDPI / 96.f;
+body->applyDpiChange();
+onDpiChanged();                       // ← 我们的回调在这里
+RECT* prcNewWindow = (RECT*)lParam;
+SetWindowPos(hwnd, nullptr, prcNewWindow->left, prcNewWindow->top, ...);  // ← 之后立刻覆盖
+```
+
+那个"系统建议矩形"是按"窗口原物理尺寸等比缩放"给的，对**内容自适应**的 dock 是错的
+（位置会被推到屏幕中间）。所以 ZDock 在 `onDpiChanged` 里**不直接重排**，
+只挂一个 1ms 的一次性定时器（`kTimerRelayout`）——让重排落在那条 `SetWindowPos` 之后。
+（一次性定时器不是轮询，红线 4 允许。）
+
+另外三点：
+
+1. **必须重算尺寸**，不能只改位置 —— `px(logical) = logical * dpi`，dpi 变了窗口物理尺寸
+   也要跟着变，否则 200% 缩放下图标只占一半大小。所以重排直接复用 `relayoutForItemCount()`。
+2. **隐藏态要保住** —— 重排内部是 `applyDockPlacement(0)`（展开态），
+   如果此刻 dock 正因自动隐藏/全屏让位滑出屏幕，必须再推回屏幕外，
+   否则它会在全屏应用底下突然冒出来。
+3. **`WM_SETTINGCHANGE` 必须按 `lParam` 过滤** —— 它是"任何设置变化都会广播"的高频消息，
+   不过滤等于给自己造了个高频回调。只认 `WorkArea` / `WindowMetrics` / `Display`。
+   同时它和 `WM_DPICHANGED` 的 `lParam` **都是指针**，而这是广播消息、谁都能往我们窗口投 ——
+   跨进程投进来的指针指向对方地址空间，解引用就是读野指针，所以先 `IsBadStringPtrW` 再读。
+
 ## 已知限制 / 下一步
 
-- 悬停标签（名称气泡）未做。
-- 显示器变化（`WM_DISPLAYCHANGE` / DPI 变化）没有处理 —— Ling 的窗口过程不暴露消息口，
-  需要子类化或给 Ling 加钩子。
+- 悬停标签（名称气泡）未做（属阶段五"悬停预览"）。
 - 配置**改动后需要手动"重新载入配置"**（或重启）才生效；文件变更监听（`ReadDirectoryChangesW`）未做。
-- 拖放排序 / 拖放添加未做。
+- 拖放排序 / 拖放添加未做（属阶段五）。
 - 菜单用的是系统默认 UI 字体，与面板自绘风格不完全统一。
+  自绘菜单需要 owner-draw，而 `WM_DRAWITEM` 要发给 owner 窗口 ——
+  Ling 的 `WinBase` 不暴露消息口，得先有个能收消息的中间窗口（跟踪器的接收窗口可以，
+  但要把它变成菜单 owner），属"观感增强"而非缺陷，暂缓。
 - **UWP / 打包应用**：跟踪与分组已支持（走 AUMID），但**启动**还不行 ——
   临时图标没有传统 exe 路径，"固定到 Dock"、点击启动都会拒绝并记一行日志，
   需要走 `shell:AppsFolder\<AUMID>` 才行（属后续阶段）。
@@ -447,5 +505,11 @@ AppBar 的注销（`ABM_REMOVE`）是应用自己的责任，shell **不检查**
   这时手动跑一次 ZDock 或用 `SPI_SETWORKAREA` 复位即可（重启 explorer 也能清）。
 - AppBar **会与系统任务栏抢边缘空间**：任务栏在底部时两者会互相挤压，
   所以默认关闭；开着的时候建议把任务栏固定在别的边。
-- 全屏让位只在**自动隐藏开启**时生效（跟任务书的语义一致：让位 = 滑出）。
+- **DPI 变化的自动化验证覆盖不到真实触发**：`WM_DPICHANGED` 的 `lParam` 是指针，
+  跨进程投递无效，而自动化改系统缩放比不现实。当前靠
+  "订阅日志存在 + `WM_DISPLAYCHANGE` 走同一条重排路径"间接覆盖。
 - 忽略键盘与无障碍。
+
+> 已修（v0.1.4）：~~显示器变化（`WM_DISPLAYCHANGE` / DPI）没有处理~~ →
+> 已有 `onDisplayChanged` + `onDpiChanged` 双来源重排；
+> ~~全屏让位只在自动隐藏开启时生效~~ → 两者已解耦。
