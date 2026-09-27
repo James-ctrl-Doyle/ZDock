@@ -465,7 +465,12 @@ Ling 的坐标/单位约定（实测，文档没写全）：
 |---|---|
 | `Node::x/y/w/h`（读） | **物理像素** |
 | `Node::setPosition` / `setSize` | **逻辑像素**（内部 ×dpi） |
-| `WinBase::setSize` / `setPosition`（窗口级） | **物理像素**（不乘） |
+| `WinBase::setSize`（窗口级） | **逻辑像素**（内部 ×dpi） |
+| `WinBase::setPosition`（窗口级） | **物理像素**（不乘） |
+
+⚠ 后两行 2026-09-27 实测更正：`WinBase::setSize` 的源码是 `this->w = w * dpi`（**乘**），
+`setPosition` 直接 `SetWindowPos`（**不乘**）。早先这张表把两者写成一样，是错的 ——
+按错的那版算窗口尺寸会差一个 dpi 倍。
 
 排查手段：`ZDOCK_VERBOSE_IND=1` 让 `placeIndicators()` 把**算出来的坐标**和**面板坐标**
 一起打日志，一眼核对"指示器 y 是否 < 面板底边"。**算得对但画不对 → 怀疑单位/坐标系；
