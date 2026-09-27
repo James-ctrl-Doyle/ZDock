@@ -2,9 +2,9 @@
 """给 ZDock 打 GitHub Release 并上传交付产物。
 
 用法：
-    <python> build-support/release.py --tag v0.1.4 \
-        --exe _review/ZDock_0.1.4.exe --config _review/config.json \
-        --notes build/_review/release_notes_v0.1.4.md
+    <python> build-support/release.py --tag v0.1.5 \
+        --exe _review/ZDock_0.1.5.exe \
+        --notes build/_review/release_notes_v0.1.5.md
 
 凭据：从 git credential helper（GCM）取，**只在内存里**，不落盘、不打印。
       取不到就报错退出（别在这里交互式输入密码）。
@@ -13,6 +13,9 @@
   1. **资产上传端点是 `uploads.github.com`**，不是 `api.github.com`
      （用后者会 404，报错信息完全看不出原因）。
   2. 未认证 API 限流是 60 次/小时，所以每个请求都带 token。
+
+⚠ **Release 里只放 exe**（用户 2026-09-27 定的）：`config.json` 由程序首次启动时
+   自己生成，没必要随包发；`--prune-config` 用来把早期 release 里已经传上去的删掉。
 
 幂等：release 已存在时不重建，只补传缺失的资产。
 """
@@ -68,13 +71,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', required=True)
     ap.add_argument('--exe', required=True, help='要上传的 exe（会作为 release 资产）')
-    ap.add_argument('--config', default=None, help='可选：一起上传的 config.json')
     ap.add_argument('--notes', default=None, help='release notes 的 markdown 文件')
     ap.add_argument('--target', default=None, help='tag 指向的 commit（默认当前 HEAD）')
     ap.add_argument('--name', default=None, help='release 标题（默认 tag）')
+    ap.add_argument('--prune-config', action='store_true',
+                    help='删掉该 release 里已存在的 config.json 资产（Release 只放 exe）')
     args = ap.parse_args()
 
-    if not os.path.exists(args.exe):
+    # ⚠ 单独跑 --prune-config 时不需要 exe（比如清理一个老版本，本地产物已被用户删掉）。
+    need_exe = not args.prune_config
+    if need_exe and not os.path.exists(args.exe):
         print('!! 找不到 %s' % args.exe)
         return 1
 
@@ -89,7 +95,10 @@ def main():
     print('repo   : %s' % REPO)
     print('tag    : %s' % args.tag)
     print('target : %s' % target)
-    print('exe    : %s (%d bytes)' % (args.exe, os.path.getsize(args.exe)))
+    if os.path.exists(args.exe):
+        print('exe    : %s (%d bytes)' % (args.exe, os.path.getsize(args.exe)))
+    else:
+        print('exe    : （不存在，只做 --prune-config 清理）')
 
     notes = ''
     if args.notes and os.path.exists(args.notes):
@@ -122,9 +131,23 @@ def main():
     # ---- 上传资产（已同名则跳过）----
     st, assets = req('GET', '%s/repos/%s/releases/%s/assets' % (API, REPO, rel['id']), token)
     have = {a['name'] for a in assets} if st == 200 and isinstance(assets, list) else set()
+    by_name = {a['name']: a for a in assets} if st == 200 and isinstance(assets, list) else {}
 
-    uploads = [args.exe] + ([args.config] if args.config else [])
-    for path in uploads:
+    # 清掉早期版本传上去的 config.json（用户要求 Release 只放 exe）
+    if args.prune_config:
+        for name in ('config.json',):
+            if name in by_name:
+                aid = by_name[name]['id']
+                st, res = req('DELETE',
+                              '%s/repos/%s/releases/assets/%s' % (API, REPO, aid), token)
+                if st in (204, 200):
+                    print('已删除资产：%s' % name)
+                    have.discard(name)
+                else:
+                    print('!! 删除资产 %s 失败 HTTP %s\n%s' % (name, st, res))
+                    return 1
+
+    for path in ([args.exe] if os.path.exists(args.exe) else []):
         name = os.path.basename(path)
         if name in have:
             print('资产已存在，跳过：%s' % name)
