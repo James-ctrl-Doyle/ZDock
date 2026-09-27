@@ -285,6 +285,34 @@ namespace zdock {
 		/// <summary>路径是不是目录（决定"用程序打开"还是"复制进去"）。</summary>
 		static bool isDirectoryPath(const std::wstring& path);
 
+		// ---- 阶段六：位置配置（停靠边 / 对齐 / 偏移）----
+
+		/// <summary>停靠边（任务书 §2 #22）。</summary>
+		enum class DockEdge { Bottom, Top, Left, Right };
+		/// <summary>沿停靠边的对齐。</summary>
+		enum class DockAlign { Start, Center, End };
+
+		/// <summary>是不是"水平边"（bottom/top）—— 图标横向排列、沿边方向是 X。</summary>
+		bool horizontalEdge() const
+		{
+			return cfgEdge == DockEdge::Bottom || cfgEdge == DockEdge::Top;
+		}
+
+		/// <summary>
+		/// 滑出方向在屏幕坐标上的单位增量（滑出 = 往这个方向移出屏幕）。
+		/// bottom → (0,+1)；top → (0,−1)；left → (−1,0)；right → (+1,0)。
+		/// </summary>
+		void slideDir(int& dx, int& dy) const;
+
+		/// <summary>面板左上角在窗口客户区里的逻辑偏移（halo 留白在哪一侧由停靠边决定）。</summary>
+		void panelOrigin(float& ox, float& oy) const;
+
+		/// <summary>窗口当前沿"滑出方向"的位移（物理像素，0 = 完全展开）。</summary>
+		int curSlideOffset() const;
+
+		/// <summary>沿滑出方向把窗口完全移出屏幕所需的位移（物理像素）。</summary>
+		int slideDistance() const;
+
 		// ---- 悬停预览（阶段五）----
 
 		/// <summary>
@@ -297,9 +325,28 @@ namespace zdock {
 		void cancelPreview();
 
 		float px(float logical) const { return logical * dpi; }
-		float panelW() const;
-		float panelH() const;
-		float iconsW() const;
+		/// <summary>面板沿停靠边方向的长度（逻辑像素）。</summary>
+		float panelAlong() const;
+		/// <summary>面板垂直停靠边方向的厚度（逻辑像素）。</summary>
+		float panelAcross() const;
+		/// <summary>图标整体沿停靠边方向的长度（逻辑像素）。</summary>
+		float iconsAlong() const;
+		/// <summary>面板宽（逻辑像素）。⚠ 左右停靠时它是"厚度"（自动换轴）。</summary>
+		float panelW() const { return horizontalEdge() ? panelAlong() : panelAcross(); }
+		/// <summary>面板高（逻辑像素）。⚠ 上下停靠时它是"厚度"（自动换轴）。</summary>
+		float panelH() const { return horizontalEdge() ? panelAcross() : panelAlong(); }
+		/// <summary>图标行的宽 / 高（逻辑像素）—— 左右停靠时两者互换。</summary>
+		float rowW() const { return horizontalEdge() ? iconsAlong() : cfgIconBase; }
+		float rowH() const { return horizontalEdge() ? cfgIconBase : iconsAlong(); }
+
+		/// <summary>
+		/// 按当前停靠边把面板与图标行摆好：位置（halo 在哪侧）、尺寸、
+		/// 图标行的排列方向（横向边 Row / 纵向边 Column）。
+		///
+		/// ⚠ 收口成一个函数：`create()` 和 `relayoutForItemCount()` 原先各抄了一份，
+		///   加停靠边之后两处都得换轴，抄两份必然漂移。
+		/// </summary>
+		void applyNodeLayout();
 		static bool inRect(POINT pt, float x, float y, float w, float h);
 
 		std::vector<DockItem> items;
@@ -322,6 +369,13 @@ namespace zdock {
 		int   cfgSlideOutMs{ 300 };
 		bool  cfgHideOnFullscreen{ true };
 		bool  cfgReserveWorkArea{ false };
+
+		// 阶段六：位置 / 外观
+		DockEdge  cfgEdge{ DockEdge::Bottom };
+		DockAlign cfgAlign{ DockAlign::Center };
+		float cfgOffset{ 0.f };          // 沿边偏移（逻辑像素）
+		float cfgOpacity{ 0.8f };        // 面板不透明度
+		bool  cfgShowIndicator{ true };  // 是否显示运行指示器
 
 		SlideState slideState{ SlideState::Shown };
 		/// 滑动的进度（0 = 完全展开，1 = 完全滑出）与本次滑动的起止/时刻

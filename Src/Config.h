@@ -77,14 +77,43 @@ namespace zdock {
 		/// <summary>Dock 上的图标列表。空 = 用内置默认表。</summary>
 		std::vector<ItemConfig> items;
 
+		// ---------------- 阶段六：位置 / 外观 / 自启 ----------------
+
 		/// <summary>
-		/// 把 "#RRGGBBAA" / "#RRGGBB" 解析成 0xAARRGGBB。
+		/// 停靠边：`"bottom"`（默认）/ `"top"` / `"left"` / `"right"`（任务书 §2 #22）。
+		///
+		/// 用字符串存而不是枚举，是为了让用户手改 config.json 时能看懂；
+		/// 认不出来的值会记一行日志并回默认（不拖垮整份配置）。
+		/// </summary>
+		std::wstring dockEdge{ L"bottom" };
+		/// <summary>沿停靠边的对齐：`"start"` / `"center"`（默认）/ `"end"`。</summary>
+		std::wstring dockAlign{ L"center" };
+		/// <summary>沿停靠边的偏移（逻辑像素，正数朝"末端"方向 —— bottom 时即向右）。</summary>
+		float dockOffset{ 0.f };
+		/// <summary>
+		/// 面板不透明度 0.5~0.95（任务书 §3）。
+		/// ⚠ 它**取代** `bgColor` 里那两位 alpha：bgColor 只贡献 RGB。
+		///   默认 0.80 与内置 bgColor 的 `#1A1A1ACC` 一致，所以升级不改变观感。
+		/// </summary>
+		float opacity{ 0.8f };
+		/// <summary>是否显示运行指示器（外观项，任务书 §2 #25）。</summary>
+		bool showIndicator{ true };
+		/// <summary>开机自启（HKCU\...\Run 项，任务书 §2 #26）。</summary>
+		bool autoStart{ false };
+		/// <summary>
+		/// 显示器锚定（任务书 §2 #31）：`-1` = 跟随（主显示器），
+		/// `>=0` = 该显示器的序号（按系统枚举顺序，从 0 起）。
+		/// </summary>
+		int monitorIndex{ -1 };
+
+		/// <summary>
+		/// 把 "#RRGGBBAA" / "#RRGGBB" 解析成 **0xRRGGBBAA**（与 `Ling::Color(uint32_t)` 同一字节序）。
 		/// 解析不了返回 nullopt（调用方兜底）。放成静态是为了让 DockWin 复用同一套解析，
 		/// 不要在别处再写一份 —— 两套解析迟早会漂移。
 		/// </summary>
 		static std::optional<uint32_t> parseColor(const std::wstring& s);
 
-		/// <summary>把 bgColor 解析成 0xAARRGGBB，失败回落到内置默认值。</summary>
+		/// <summary>把 bgColor 解析成 0xRRGGBBAA，失败回落到内置默认值。</summary>
 		uint32_t bgColorValue() const;
 
 		/// <summary>配置文件路径（exe 同目录 config.json）。</summary>

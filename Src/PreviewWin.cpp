@@ -51,7 +51,7 @@ namespace zdock {
 		target = nullptr;
 	}
 
-	void PreviewWin::showFor(HWND hTarget, const std::wstring& title, POINT anchorScreen)
+	void PreviewWin::showFor(HWND hTarget, const std::wstring& title, POINT wantTopLeft)
 	{
 		if (!hwnd) createOnce();
 		if (!hwnd || !hTarget || !IsWindow(hTarget)) return;
@@ -109,15 +109,15 @@ namespace zdock {
 			return;
 		}
 
-		// ---- 摆位置：在锚点上方居中，并夹进屏幕内 ----
+		// ---- 摆位置：用调用方算好的目标左上角，只做"夹进屏幕" ----
 		// ⚠ 用**监视器 rcMonitor** 而不是工作区：工作区会被 AppBar 预留改掉，
 		//   那是个自引用（见 DockWin::dockRectShown 的注释）。
 		const int winW = static_cast<int>(std::lround(kWinW * d));
 		const int winH = static_cast<int>(std::lround(kWinH * d));
-		int x = anchorScreen.x - winW / 2;
-		int y = anchorScreen.y - winH;          // 锚点通常是图标顶边中点
+		int x = wantTopLeft.x;
+		int y = wantTopLeft.y;
 
-		HMONITOR mon = MonitorFromPoint(anchorScreen, MONITOR_DEFAULTTONEAREST);
+		HMONITOR mon = MonitorFromPoint(wantTopLeft, MONITOR_DEFAULTTONEAREST);
 		MONITORINFO mi{};
 		mi.cbSize = sizeof(mi);
 		if (mon && GetMonitorInfoW(mon, &mi)) {

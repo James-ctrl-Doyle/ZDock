@@ -2,10 +2,12 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段五（悬停预览 / 拖文件打开）已完成（v0.1.5）**
-（v0.1.4 已发布 GitHub Release；依赖 **Ling v1.3.1**。
+当前进度：**阶段六进行中 —— 已完成「位置配置」（v0.1.6）**，设置窗口 / 滚轮调大小 /
+开机自启 / 多显示器锚定待做。
+（v0.1.4、v0.1.5 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
-拖放 14 项、预览 13 项探针全 PASS；过程中挖出的 5 个 bug 已根因级修复，见 `CHANGELOG.md`）。
+拖放 14 项、预览 13 项、位置配置 18 项探针全 PASS；过程中挖出的 bug 已根因级修复，
+见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -175,6 +177,15 @@ exe 同目录的 `config.json`，首次启动自动生成。全部字段与默�
   "slideOutMs": 300,       // 滑出动画时长（ease-out），[0, 3000]
   "hideOnFullscreen": true,// 有全屏应用在前台时保持隐藏
   "reserveWorkArea": false,// 向系统申请工作区（AppBar）—— 最大化窗口会避开 dock
+
+  // ---- 阶段六：位置 / 外观 ----
+  "dockEdge": "bottom",    // 停靠边：bottom(默认) / top / left / right
+  "dockAlign": "center",   // 沿停靠边的对齐：start / center(默认) / end
+  "dockOffset": 0,         // 沿停靠边的偏移（逻辑像素）；正数朝"末端"方向
+  "opacity": 0.8,          // 面板不透明度，[0.5, 0.95]（bgColor 只贡献 RGB）
+  "showIndicator": true,   // 是否显示运行指示器
+  "autoStart": false,      // 开机自启（尚未实现，见「已知限制」）
+  "monitorIndex": -1,      // 显示器锚定（尚未实现，见「已知限制」）
   "items": [               // 图标列表；顺序即显示顺序
     { "path": "C:\\Windows\\explorer.exe" },
     { "path": "C:\\Windows\\System32\\notepad.exe", "name": "记事本" }
@@ -229,6 +240,7 @@ bash build-support/build.sh
 <python> build-support/_probe_display_change.py       # 显示器/DPI 变化自适应 + 野指针健壮性（26 项）
 <python> build-support/_probe_drop.py                 # 拖文件到图标（14 项）
 <python> build-support/_probe_preview.py              # 悬停预览 / DWM 缩略图（13 项）
+<python> build-support/_probe_layout.py               # 位置配置：4 停靠边 / 对齐 / 偏移（18 项）
 <python> build-support/_probe_ling_appid.sh           # 编出读 Ling::App::appID 的小工具（升级验证）
 <python> build-support/_probe_ling_build.sh <名>      # 编一个"Ling 窗口"探针（如 _probe_subclass）
 bash build-support/_probe_dwm_thumb.sh                # DWM 缩略图宿主可行性（纯 Win32）
@@ -580,6 +592,14 @@ LRESULT CALLBACK DockWin::subclassProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 ## 已知限制 / 下一步
 
+- **阶段六还没做完**，剩余三块：
+  1. **设置窗口**（任务书 §2 #25）—— 目前所有可调项都只能手改 `config.json`。
+     Ling 有 `Button` / `Slider` / `Label` / `TextBox` / `ScrollerBox`（没有 CheckBox/ComboBox，
+     开关用 Button 自绘、选项用 Button 组），所以走**自绘**是可行的 ——
+     也符合这个项目一贯不引系统控件外观的做法。
+  2. **滚轮调大小**（§2 #24）：悬停在 dock 上滚轮 → 图标基准 32~128 实时调。
+  3. **开机自启**（§2 #26，HKCU Run）与**多显示器锚定**（§2 #31）。
+     `autoStart` / `monitorIndex` 两个配置字段已经占好位（能读能写），只是还没接实现。
 - **多窗口预览还是"取第一个窗口"**，没做成任务书 §2 #17 / #16 说的**列表**
   （每窗口一张缩略图 + 标题）。单窗口预览、画面来源、位置都通了，列表是排列与
   多缩略图管理的事，下一步补。

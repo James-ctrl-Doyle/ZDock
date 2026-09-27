@@ -32,25 +32,47 @@ namespace zdock {
 		appBar.unregister_();
 	}
 
-	float DockWin::panelW() const
-	{
-		const float n = static_cast<float>(items.size());
-		if (n <= 0) return 2 * kPadX;
-		return n * cfgIconBase + (n - 1) * cfgIconGap + 2 * kPadX;
-	}
-
-	float DockWin::panelH() const
-	{
-		// 面板底部多留一条指示器的空间：指示器画在图标下缘之外（不挤压图标），
-		// 但它落在面板范围内，否则会悬在面板外面很难看。
-		return cfgIconBase + 2 * kPadY + px(kIndicatorDia + kIndicatorGap) / (dpi > 0.f ? dpi : 1.f);
-	}
-
-	float DockWin::iconsW() const
+	float DockWin::iconsAlong() const
 	{
 		const float n = static_cast<float>(items.size());
 		if (n <= 0) return 0.f;
 		return n * cfgIconBase + (n - 1) * cfgIconGap;
+	}
+
+	float DockWin::panelAlong() const
+	{
+		if (items.empty()) return 2 * kPadX;
+		return iconsAlong() + 2 * kPadX;
+	}
+
+	float DockWin::panelAcross() const
+	{
+		// 面板厚度方向多留一条指示器的空间：指示器画在图标之外（不挤压图标），
+		// 但它落在面板范围内，否则会悬在面板外面很难看。
+		return cfgIconBase + 2 * kPadY + px(kIndicatorDia + kIndicatorGap) / (dpi > 0.f ? dpi : 1.f);
+	}
+
+	void DockWin::slideDir(int& dx, int& dy) const
+	{
+		dx = 0;
+		dy = 0;
+		switch (cfgEdge) {
+		case DockEdge::Bottom: dy = +1; break;   // 向下滑出
+		case DockEdge::Top:    dy = -1; break;   // 向上滑出
+		case DockEdge::Left:   dx = -1; break;   // 向左滑出
+		case DockEdge::Right:  dx = +1; break;   // 向右滑出
+		}
+	}
+
+	void DockWin::panelOrigin(float& ox, float& oy) const
+	{
+		// halo 留在"远离屏幕边"的那一侧 —— 图标朝那个方向放大、溢出到那块留白里。
+		switch (cfgEdge) {
+		case DockEdge::Bottom: ox = kSideSlack; oy = kHaloH;     break;  // halo 在上
+		case DockEdge::Top:    ox = kSideSlack; oy = 0.f;        break;  // halo 在下
+		case DockEdge::Left:   ox = 0.f;        oy = kSideSlack; break;  // halo 在右
+		case DockEdge::Right:  ox = kHaloH;     oy = kSideSlack; break;  // halo 在左
+		}
 	}
 
 	bool DockWin::inRect(POINT pt, float x, float y, float w, float h)
@@ -75,6 +97,21 @@ namespace zdock {
 		cfgSlideOutMs = cfg->slideOutMs;
 		cfgHideOnFullscreen = cfg->hideOnFullscreen;
 		cfgReserveWorkArea = cfg->reserveWorkArea;
+
+		// 阶段六：位置 / 外观。字符串→枚举的兜底在 Config::load() 里已经做过
+		// （认不出的值会记日志并保留默认），这里只做映射。
+		cfgEdge = DockEdge::Bottom;
+		if (cfg->dockEdge == L"top") cfgEdge = DockEdge::Top;
+		else if (cfg->dockEdge == L"left") cfgEdge = DockEdge::Left;
+		else if (cfg->dockEdge == L"right") cfgEdge = DockEdge::Right;
+
+		cfgAlign = DockAlign::Center;
+		if (cfg->dockAlign == L"start") cfgAlign = DockAlign::Start;
+		else if (cfg->dockAlign == L"end") cfgAlign = DockAlign::End;
+
+		cfgOffset = cfg->dockOffset;
+		cfgOpacity = cfg->opacity;
+		cfgShowIndicator = cfg->showIndicator;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -100,9 +137,11 @@ namespace zdock {
 		applyConfig();
 		collectItemsFromConfig();
 
-		const float winW = panelW() + 2 * kSideSlack;   // 逻辑
-		const float winH = kHaloH + panelH();
-		setSize(winW, winH);                            // 内部 ×dpi，之后本对象的 w/h 是物理像素
+		// 窗口尺寸 = 面板 + 四周留白（留白分布随停靠边换轴，与 relayoutForItemCount 同一套公式）。
+		// ⚠ WinBase::setSize 收的是**逻辑**值（内部 ×dpi）；setPosition 收的是**物理**值。
+		const float winW = horizontalEdge() ? (panelW() + 2 * kSideSlack) : (panelW() + kHaloH);
+		const float winH = horizontalEdge() ? (panelH() + kHaloH) : (panelH() + 2 * kSideSlack);
+		setSize(winW, winH);
 
 		// 定位统一走 applyDockPlacement（阶段四抽出来：原先 create/rebuild/
 		// relayoutForItemCount 各抄了一份，自动隐藏要在位置上做偏移，必须先收口）。
@@ -269,28 +308,34 @@ namespace zdock {
 		// 图标放大后要溢出面板，挂在面板下面就一起被剪掉了。
 		panel = body->makeChild<Ling::Node>();
 		panel->setPositionType(Ling::Position::Absolute);
-		panel->setPosition(Ling::Edge::Left, kSideSlack);
-		panel->setPosition(Ling::Edge::Top, kHaloH);
-		panel->setSize(panelW(), panelH());
-		// 背景色与圆角都来自 config.json（"#RRGGBBAA" 已在 Config 里校验过格式）
-		panel->setBg(Ling::Color(Config::get()->bgColorValue()));
+		// 背景色与圆角都来自 config.json。
+		// ⚠ bgColor 只贡献 RGB，**透明度由 opacity 决定**（任务书 §3：0.5~0.95 可调）。
+		//   两者字节序都是 0xRRGGBBAA（与 Ling::Color 一致）。
+		{
+			const uint32_t c = Config::get()->bgColorValue();
+			const uint32_t a = static_cast<uint32_t>(
+				std::lround(std::clamp(cfgOpacity, 0.f, 1.f) * 255.f));
+			panel->setBg(Ling::Color((c & 0xFFFFFF00u) | a));
+		}
 		panel->setBorderRadius(Config::get()->cornerRadius);
 		panel->setBorder(1.f, Ling::Color(0xFFFFFF14));
 
 		row = body->makeChild<Ling::Node>();
 		row->setPositionType(Ling::Position::Absolute);
-		row->setPosition(Ling::Edge::Left, kSideSlack + kPadX);
-		row->setPosition(Ling::Edge::Top, kHaloH + kPadY);
-		row->setSize(iconsW(), cfgIconBase);
-		row->setFlexDirection(Ling::FlexDirection::Row);
-		row->setAlignItems(Ling::Align::FlexEnd);
+
+		// 面板 / 图标行的位置、尺寸、排列方向全部随停靠边 —— 收口在这一个函数里
+		applyNodeLayout();
 
 		// 指示器**不放进 row** —— row 是 Flex 容器，多出来的节点会被当成第二个
 		// 图标参与排版。它们挂在 body 上，位置在 layout 完成后按图标坐标算。
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = row->makeChild<IconNode>();
 			node->setSize(cfgIconBase, cfgIconBase);
-			if (i + 1 < items.size()) node->setMarginRight(cfgIconGap);
+			// 间距加在**沿边方向**：横向边是右间距，纵向边是下间距（见 applyNodeLayout）
+			if (i + 1 < items.size()) {
+				if (horizontalEdge()) node->setMarginRight(cfgIconGap);
+				else node->setMarginBottom(cfgIconGap);
+			}
 			items[i].node = node;
 
 			auto* dot = body->makeChild<IndicatorNode>();
@@ -397,11 +442,19 @@ namespace zdock {
 		// 阶段五：悬停预览。进入图标 → 起 300ms 计时；离开图标 → 立刻收。
 		// ⚠ 用"一次性定时器"实现延迟，不是轮询（任务书红线 4 的例外条款允许
 		//   "自身 UI 状态"的短定时器）。
+		//
+		// ⚠⚠ 每次悬停**变化**都要重置延迟，不能"只在首次进入时启动"：
+		//   用户在图标间快速扫视时，hover 会一直在某个图标上（每次都是 >= 0），
+		//   定时器如果不重置就会在 300ms 后到期 → 预览反复弹出、还反复切换目标
+		//   （每次切换都要 DWM 注册/注销缩略图）。实测把"悬停扫动"的 CPU
+		//   从 1.0% 推到 5.7%，观感上也在闪。
+		//   重置之后语义才对：**停住不动 300ms 才弹**。
 		if (idx >= 0) {
-			if (!previewTimerOn) {
-				setTimer(kPreviewDelayMs, kTimerPreview);
-				previewTimerOn = true;
-			}
+			if (previewTimerOn) killTimer(kTimerPreview);
+			setTimer(kPreviewDelayMs, kTimerPreview);
+			previewTimerOn = true;
+			// 换到别的图标 → 先把上一个的预览收掉（目标变了，缩略图要重新注册）
+			preview.hidePreview();
 		}
 		else {
 			cancelPreview();
@@ -438,23 +491,53 @@ namespace zdock {
 		}
 		if (!target) target = g->windows.front();
 
-		// 锚点 = 该图标**放大后**可见框的顶边中点（node 的坐标是物理像素、绝对，
-		// 正好是我们要的），再从客户区转到屏幕。
-		POINT anchor{};
+		// 锚点：预览要浮在**朝屏幕中心那一侧**（和 halo 同侧、不挡图标），
+		// 具体哪一侧由停靠边决定。这里直接把"预览窗口的目标左上角"算出来，
+		// PreviewWin 只负责夹进屏幕。
+		// ⚠ node->x/y/w/h 都是**物理**像素、相对客户区，最后 ClientToScreen 转屏幕坐标。
 		const auto& it = items[hoverIndex];
+		const float d = (dpi > 0.f) ? dpi : 1.f;
+		const int pw = static_cast<int>(std::lround(PreviewWin::kWinW * d));
+		const int ph = static_cast<int>(std::lround(PreviewWin::kWinH * d));
+
+		int nx = 0, ny = 0, nw = 0, nh = 0;
 		if (it.node) {
-			anchor.x = static_cast<LONG>(it.node->x + it.node->w * 0.5f);
-			anchor.y = static_cast<LONG>(it.node->y);
+			nx = static_cast<int>(it.node->x);
+			ny = static_cast<int>(it.node->y);
+			nw = static_cast<int>(it.node->w);
+			nh = static_cast<int>(it.node->h);
 		}
 		else {
-			const float d = (dpi > 0.f) ? dpi : 1.f;
-			anchor.x = static_cast<LONG>((kSideSlack + kPadX
-				+ hoverIndex * (cfgIconBase + cfgIconGap) + cfgIconBase * 0.5f) * d);
-			anchor.y = static_cast<LONG>((kHaloH + kPadY) * d);
+			// 理论上有 node 才有图标可悬停；兜底给个面板内的位置
+			float ox = 0.f, oy = 0.f;
+			panelOrigin(ox, oy);
+			nx = static_cast<int>(ox * d);
+			ny = static_cast<int>(oy * d);
+			nw = nh = static_cast<int>(cfgIconBase * d);
 		}
-		ClientToScreen(hwnd, &anchor);
 
-		preview.showFor(target, g->displayName, anchor);
+		POINT tl{};
+		switch (cfgEdge) {
+		case DockEdge::Bottom:   // 停靠底边 → 预览在图标上方
+			tl.x = nx + nw / 2 - pw / 2;
+			tl.y = ny - ph;
+			break;
+		case DockEdge::Top:      // 停靠顶边 → 预览在图标下方
+			tl.x = nx + nw / 2 - pw / 2;
+			tl.y = ny + nh;
+			break;
+		case DockEdge::Left:     // 停靠左边 → 预览在图标右侧
+			tl.x = nx + nw;
+			tl.y = ny + nh / 2 - ph / 2;
+			break;
+		case DockEdge::Right:    // 停靠右边 → 预览在图标左侧
+			tl.x = nx - pw;
+			tl.y = ny + nh / 2 - ph / 2;
+			break;
+		}
+		ClientToScreen(hwnd, &tl);
+
+		preview.showFor(target, g->displayName, tl);
 	}
 
 	void DockWin::applyHover(int index)
@@ -612,7 +695,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.5 · 悬停预览 / 拖放");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.6 · 位置配置 / 悬停预览 / 拖放");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1039,25 +1122,36 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::relayoutForItemCount()
 	{
-		// row 是 Flex 行；间距是每个节点的 marginRight。项数变了要重设一遍：
+		// row 是 Flex 容器；间距是每个节点的沿边外边距。项数变了要重设一遍：
 		// 除最后一项外都要有间距。
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = items[i].node;
 			if (!node) continue;
 			node->setSize(cfgIconBase, cfgIconBase);
-			node->setMarginRight((i + 1 < items.size()) ? cfgIconGap : 0.f);
+			const float gap = (i + 1 < items.size()) ? cfgIconGap : 0.f;
+			// ⚠ 间距要加在**沿边方向**：横向边 → 右间距；纵向边 → 下间距。
+			//   不然纵向停靠时图标会挤成一列没有间隙。
+			if (horizontalEdge()) {
+				node->setMarginRight(gap);
+				node->setMarginBottom(0.f);
+			}
+			else {
+				node->setMarginRight(0.f);
+				node->setMarginBottom(gap);
+			}
 		}
 
-		// 面板 / 行 / 窗口尺寸随项数变
-		panel->setPosition(Ling::Edge::Left, kSideSlack);
-		panel->setSize(panelW(), panelH());
-		row->setSize(iconsW(), cfgIconBase);
+		// 面板 / 行 / 排列方向（位置与尺寸都随停靠边）
+		applyNodeLayout();
 
-		const float winW = panelW() + 2 * kSideSlack;
-		const float winH = kHaloH + panelH();
+		// 窗口尺寸 = 面板 + 四周留白。⚠ 留白怎么分布也随停靠边换轴：
+		//   横向边（bottom/top）→ 左右各 kSideSlack，上方或下方留 kHaloH
+		//   纵向边（left/right）→ 上下各 kSideSlack，左方或右方留 kHaloH
+		const float winW = horizontalEdge() ? (panelW() + 2 * kSideSlack) : (panelW() + kHaloH);
+		const float winH = horizontalEdge() ? (panelH() + kHaloH) : (panelH() + 2 * kSideSlack);
 
-		// 窗口尺寸变化的**同时**要把位置摆回"水平居中、贴底"，
-		// 否则窗口会以左下角为锚、越来越靠右。
+		// 窗口尺寸变化的**同时**要把位置摆回"贴边 + 按对齐居中"，
+		// 否则窗口会以左下角为锚、越走越偏。
 		setSize(winW, winH);
 		applyDockPlacement(0);
 
@@ -1077,7 +1171,10 @@ namespace zdock {
 			if (!item.indicator) continue;
 			const AppGroup* g = groupOfItem(i);
 			const bool running = item.temporary || (g && g->running());
-			item.indicator->setOn(running);
+			// ⚠ 指示器开关（showIndicator）是"**显示**"层面的开关，
+			//   而 setOn 的语义本来就是这个 —— 但它平时靠 running 驱动。
+			//   这里把配置关掉时一律置 off，不必真的销毁节点。
+			item.indicator->setOn(cfgShowIndicator && running);
 			if (running) {
 				// 前台应用用满色强调色，后台运行用半透明同色系。
 				// ⚠ 别调太暗：指示器只有 4px，面板底色又是深灰，太暗了根本看不见
@@ -1118,14 +1215,28 @@ namespace zdock {
 			auto& item = items[i];
 			if (!item.indicator || !item.node) continue;
 			// 物理像素 → 逻辑像素
-			const float cxLog = (item.node->x + item.node->w * 0.5f) / d;
-			const float yLog = (item.node->y + item.node->h) / d + kIndicatorGap;
-			item.indicator->setPosition(Ling::Edge::Left, cxLog - kIndicatorDia * 0.5f);
-			item.indicator->setPosition(Ling::Edge::Top, yLog);
+			const float nx = item.node->x / d;
+			const float ny = item.node->y / d;
+			const float nw = item.node->w / d;
+			const float nh = item.node->h / d;
+
+			// 指示器画在**面板厚度方向的末端**（图标之后那一格）——
+			// `panelAcross()` 就是为它多留的：横向停靠留在下方、纵向停靠留在右侧。
+			// 这样四个停靠边用同一套留白逻辑，不用为每个边单独调偏移。
+			float dx = 0.f, dy = 0.f;
+			if (horizontalEdge()) {
+				dx = nx + nw * 0.5f - kIndicatorDia * 0.5f;
+				dy = ny + nh + kIndicatorGap;
+			}
+			else {
+				dx = nx + nw + kIndicatorGap;
+				dy = ny + nh * 0.5f - kIndicatorDia * 0.5f;
+			}
+			item.indicator->setPosition(Ling::Edge::Left, dx);
+			item.indicator->setPosition(Ling::Edge::Top, dy);
 			if (verbose) {
 				log(std::format(L"[ind] #{} node物理=({:.1f},{:.1f},{:.1f},{:.1f}) -> dot逻辑=({:.1f},{:.1f}) 面板逻辑=({:.1f},{:.1f},{:.1f},{:.1f})",
-					i, item.node->x, item.node->y, item.node->w, item.node->h,
-					cxLog - kIndicatorDia * 0.5f, yLog,
+					i, item.node->x, item.node->y, item.node->w, item.node->h, dx, dy,
 					panel->x / d, panel->y / d, panel->w / d, panel->h / d));
 			}
 		}
@@ -1308,16 +1419,49 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	RECT DockWin::dockRectShown() const
 	{
-		RECT work = monitorRect();   // rcMonitor：不随 AppBar 预留变化
+		const RECT mon = monitorRect();   // rcMonitor：不随 AppBar 预留变化
 
 		const int panelWpx = static_cast<int>(px(panelW()));
-		const int panelBottom = work.bottom - static_cast<int>(px(Config::get()->bottomMargin));
-		const int panelLeft = work.left + ((work.right - work.left) - panelWpx) / 2;
+		const int panelHpx = static_cast<int>(px(panelH()));
+		const int margin = static_cast<int>(px(Config::get()->bottomMargin));
+		const int off = static_cast<int>(px(cfgOffset));
+		const int monW = mon.right - mon.left;
+		const int monH = mon.bottom - mon.top;
 
-		// 窗口矩形比面板大（四周是透明 halo / slack），所以窗口左上角要往外让。
+		int panelLeft = mon.left;
+		int panelTop = mon.top;
+
+		if (horizontalEdge()) {
+			// 沿停靠边的方向是 X（bottom/top）：先按对齐定左右，交叉轴由停靠边定上下
+			switch (cfgAlign) {
+			case DockAlign::Start:  panelLeft = mon.left + off; break;
+			case DockAlign::Center: panelLeft = mon.left + (monW - panelWpx) / 2 + off; break;
+			case DockAlign::End:    panelLeft = mon.right - panelWpx - off; break;
+			}
+			panelTop = (cfgEdge == DockEdge::Bottom)
+				? mon.bottom - margin - panelHpx
+				: mon.top + margin;
+		}
+		else {
+			// 沿停靠边的方向是 Y（left/right）
+			switch (cfgAlign) {
+			case DockAlign::Start:  panelTop = mon.top + off; break;
+			case DockAlign::Center: panelTop = mon.top + (monH - panelHpx) / 2 + off; break;
+			case DockAlign::End:    panelTop = mon.bottom - panelHpx - off; break;
+			}
+			panelLeft = (cfgEdge == DockEdge::Left)
+				? mon.left + margin
+				: mon.right - panelWpx - margin;
+		}
+
+		// 窗口矩形比面板大（留白是透明 halo，够图标放大 / 弹标签用），
+		// 所以窗口左上角要按"halo 在哪一侧"往外让。
+		float ox = 0.f, oy = 0.f;
+		panelOrigin(ox, oy);
+
 		RECT r{};
-		r.left = panelLeft - static_cast<int>(px(kSideSlack));
-		r.top = panelBottom - static_cast<int>(h);
+		r.left = panelLeft - static_cast<int>(px(ox));
+		r.top = panelTop - static_cast<int>(px(oy));
 		r.right = r.left + static_cast<LONG>(w);
 		r.bottom = r.top + static_cast<LONG>(h);
 		return r;
@@ -1329,12 +1473,69 @@ namespace zdock {
 	// ⚠ 本 dock 贴**底边**，滑出方向是**往下**：offsetY 为正 = 往下 = 往屏幕外。
 	//   面板高度加一点余量作为总位移，滑完之后整个窗口都在屏幕外。
 	// ---------------------------------------------------------------------------
-	void DockWin::applyDockPlacement(int offsetY)
+	void DockWin::applyNodeLayout()
 	{
+		if (!panel || !row) return;
+
+		float ox = 0.f, oy = 0.f;
+		panelOrigin(ox, oy);
+
+		panel->setPosition(Ling::Edge::Left, ox);
+		panel->setPosition(Ling::Edge::Top, oy);
+		panel->setSize(panelW(), panelH());
+
+		// 行在面板内的偏移：**沿边方向**用 kPadX，**厚度方向**用 kPadY。
+		// 纵向停靠时两者换轴 —— 这一步最容易写反（面板宽是厚度、高是沿边长度）。
+		const float rx = ox + (horizontalEdge() ? kPadX : kPadY);
+		const float ry = oy + (horizontalEdge() ? kPadY : kPadX);
+		row->setPosition(Ling::Edge::Left, rx);
+		row->setPosition(Ling::Edge::Top, ry);
+		row->setSize(rowW(), rowH());
+
+		// 排列方向：横向边 Row（现有行为）、纵向边 Column
+		row->setFlexDirection(horizontalEdge() ? Ling::FlexDirection::Row : Ling::FlexDirection::Column);
+		// 交叉轴对齐：让图标靠"面板内侧"（远离屏幕边那一侧），
+		// 因为靠屏幕边那条留给了运行指示器。
+		//   bottom/top → 交叉轴是 Y；left → 图标靠右(FlexEnd)；right → 靠左(FlexStart)
+		row->setAlignItems(Ling::Align::FlexEnd);
+	}
+
+	void DockWin::applyDockPlacement(int offset)
+	{
+		// ⚠ offset 的语义是"沿**滑出方向**的位移"（0 = 完全展开），
+		//   方向由停靠边决定 —— 不再只加在 Y 上（左右停靠要加在 X 上）。
 		const RECT r = dockRectShown();
 		shownOrigin.x = r.left;
 		shownOrigin.y = r.top;
-		setPosition(r.left, r.top + offsetY);
+
+		int dx = 0, dy = 0;
+		slideDir(dx, dy);
+		setPosition(r.left + dx * offset, r.top + dy * offset);
+	}
+
+	int DockWin::curSlideOffset() const
+	{
+		if (!hwnd) return 0;
+		RECT cur{};
+		GetWindowRect(hwnd, &cur);
+		int dx = 0, dy = 0;
+		slideDir(dx, dy);
+		// slideDir 是单位向量，所以位移就是对应轴上的差值
+		return dy ? (cur.top - shownOrigin.y) : (cur.left - shownOrigin.x);
+	}
+
+	int DockWin::slideDistance() const
+	{
+		const RECT mon = monitorRect();
+		const RECT r = dockRectShown();
+		// 各方向都是"从展开位置到整个窗口离开屏幕"的距离
+		switch (cfgEdge) {
+		case DockEdge::Bottom: return mon.bottom - r.top;
+		case DockEdge::Top:    return r.bottom - mon.top;
+		case DockEdge::Left:   return r.right - mon.left;
+		case DockEdge::Right:  return mon.right - r.left;
+		}
+		return static_cast<int>(h);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1345,11 +1546,9 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::applyDockPlacementHidden()
 	{
-		const RECT r = dockRectShown();
-		shownOrigin.x = r.left;
-		shownOrigin.y = r.top;
-		const RECT mon = monitorRect();
-		setPosition(r.left, mon.bottom);
+		// 沿滑出方向推到底 —— 用 slideDistance() 而不是窗口高/宽，
+		// 四个停靠边都成立（左右停靠时"出屏距离"是窗口宽，不是高）。
+		applyDockPlacement(slideDistance());
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1442,22 +1641,59 @@ namespace zdock {
 	{
 		// ⚠ 同样锚监视器，不锚工作区 —— 否则热区会跟着 AppBar 预留一起上爬，
 		//   越爬越高，最后鼠标够不到。
-		RECT work = monitorRect();
-
-		const int screenW = work.right - work.left;
-		const int panelWpx = static_cast<int>(px(panelW()));
-		const int wantW = std::max(panelWpx, screenW / 2);
-
+		const RECT mon = monitorRect();
 		const int thick = 3;   // 物理像素，任务书 §4 定 3px
-		const int cx = work.left + screenW / 2;
+
+		// 面板在屏幕上的位置（窗口矩形 + halo 偏移反推）
+		const RECT wr = dockRectShown();
+		float ox = 0.f, oy = 0.f;
+		panelOrigin(ox, oy);
+		const int panelLeft = wr.left + static_cast<int>(px(ox));
+		const int panelTop = wr.top + static_cast<int>(px(oy));
+		const int panelWpx = static_cast<int>(px(panelW()));
+		const int panelHpx = static_cast<int>(px(panelH()));
 
 		RECT r{};
-		r.left = cx - wantW / 2;
-		r.right = r.left + wantW;
-		// 贴屏幕底边（不是工作区底边）—— 热区是碰鼠标用的，
-		// 必须待在"用户以为 dock 该出现的那条边"上。
-		r.bottom = work.bottom;
-		r.top = r.bottom - thick;
+		if (horizontalEdge()) {
+			// 横向细条，贴屏幕的上边或下边。
+			// ⚠ 沿边范围以**面板中心**为中心（不是屏幕中心）—— 这样 dock 换成
+			//   align=start/end 之后热区会跟着走，用户仍然能对着 dock 划过去。
+			const int monW = mon.right - mon.left;
+			const int wantW = std::max(panelWpx, monW / 2);
+			const int cx = panelLeft + panelWpx / 2;
+			// ⚠ 都先收成 int 再比 —— LONG 和 int 在 Windows 上是不同类型，
+			//   直接 std::max(LONG, int) 会模板推导失败（C2672）。
+			const int l = std::max(static_cast<int>(mon.left), cx - wantW / 2);
+			const int rr = std::min(static_cast<int>(mon.right), l + wantW);
+			r.left = l;
+			r.right = rr;
+			if (cfgEdge == DockEdge::Bottom) {
+				r.bottom = mon.bottom;
+				r.top = r.bottom - thick;
+			}
+			else {
+				r.top = mon.top;
+				r.bottom = r.top + thick;
+			}
+		}
+		else {
+			// 纵向细条，贴屏幕的左边或右边
+			const int monH = mon.bottom - mon.top;
+			const int wantH = std::max(panelHpx, monH / 2);
+			const int cy = panelTop + panelHpx / 2;
+			const int t = std::max(static_cast<int>(mon.top), cy - wantH / 2);
+			const int b = std::min(static_cast<int>(mon.bottom), t + wantH);
+			r.top = t;
+			r.bottom = b;
+			if (cfgEdge == DockEdge::Left) {
+				r.left = mon.left;
+				r.right = r.left + thick;
+			}
+			else {
+				r.right = mon.right;
+				r.left = r.right - thick;
+			}
+		}
 		return r;
 	}
 
@@ -1543,9 +1779,7 @@ namespace zdock {
 		if (slideState == SlideState::Shown && slideT <= 0.f) return;
 
 		// 从当前实际位置开始补间（避免滑动中途反向时跳变）
-		RECT cur{};
-		GetWindowRect(hwnd, &cur);
-		slideFrom = static_cast<float>(cur.top - shownOrigin.y);
+		slideFrom = static_cast<float>(curSlideOffset());
 		slideTo = 0.f;
 		slideT = slideFrom;
 		slideDurMs = cfgSlideInMs;
@@ -1566,12 +1800,9 @@ namespace zdock {
 		if (!hwnd) return;
 		if (slideState == SlideState::Hidden && slideT >= 1.f) return;
 
-		RECT cur{};
-		GetWindowRect(hwnd, &cur);
-		slideFrom = static_cast<float>(cur.top - shownOrigin.y);
-		// 目标：整个窗口滑到屏幕底边之外（同样锚监视器，不受工作区影响）
-		const RECT mon = monitorRect();
-		const float full = static_cast<float>(mon.bottom - shownOrigin.y);
+		slideFrom = static_cast<float>(curSlideOffset());
+		// 目标：整个窗口滑到停靠边之外（同样锚监视器，不受工作区影响）
+		const float full = static_cast<float>(slideDistance());
 		slideTo = full;
 		slideT = (slideTo > 0.f) ? (slideFrom / slideTo) : 1.f;
 		slideDurMs = cfgSlideOutMs;
@@ -1603,7 +1834,13 @@ namespace zdock {
 		const float e = 1.f - std::pow(1.f - lin, 3.f);
 
 		const float dist = slideFrom + (slideTo - slideFrom) * e;
-		setPosition(shownOrigin.x, shownOrigin.y + static_cast<int>(std::lround(dist)));
+		{
+			// 位移沿**滑出方向**施加（bottom=+Y / top=−Y / left=−X / right=+X）
+			int dx = 0, dy = 0;
+			slideDir(dx, dy);
+			const int d = static_cast<int>(std::lround(dist));
+			setPosition(shownOrigin.x + dx * d, shownOrigin.y + dy * d);
+		}
 
 		if (lin >= 1.f) {
 			killTimer(kTimerSlide);

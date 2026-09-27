@@ -37,10 +37,10 @@ namespace zdock {
 		void createOnce();
 
 		/// <summary>
-		/// 显示 `target` 窗口的预览。`anchorScreen` 是悬浮锚点（图标在屏幕上的中心），
-		/// 预览会在它上方居中弹出。
+		/// 显示 `target` 窗口的预览。`wantTopLeft` 是**期望的窗口左上角（屏幕物理像素）**——
+		/// 由调用方按停靠边算好"预览该浮在哪一侧"，这里只负责夹进屏幕内。
 		/// </summary>
-		void showFor(HWND target, const std::wstring& title, POINT anchorScreen);
+		void showFor(HWND target, const std::wstring& title, POINT wantTopLeft);
 
 		/// <summary>收起（注销缩略图 + 隐藏窗口）。</summary>
 		void hidePreview();
@@ -52,10 +52,6 @@ namespace zdock {
 
 		void onCreated() override;
 
-	private:
-		void log(const std::wstring& s) const { if (onLog) onLog(s); }
-		void unregisterThumb();
-
 		/// 缩略图区尺寸（逻辑像素）。窗口 = 缩略图区 + 四周留白 + 底部标题条。
 		static constexpr float kThumbW = 240.f;
 		static constexpr float kThumbH = 150.f;
@@ -63,6 +59,10 @@ namespace zdock {
 		static constexpr float kTitleH = 22.f;
 		static constexpr float kWinW = kThumbW + 2 * kPad;
 		static constexpr float kWinH = kThumbH + 2 * kPad + kTitleH;
+
+	private:
+		void log(const std::wstring& s) const { if (onLog) onLog(s); }
+		void unregisterThumb();
 
 		HWND target{ nullptr };
 		HTHUMBNAIL thumb{ nullptr };

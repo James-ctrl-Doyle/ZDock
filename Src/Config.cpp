@@ -62,7 +62,8 @@ namespace zdock {
 			return out;
 		}
 
-		/// "#RRGGBBAA" / "#RRGGBB" -> 0xAARRGGBB。解析失败返回 nullopt 让调用方兜底。
+		/// "#RRGGBBAA" / "#RRGGBB" -> **0xRRGGBBAA**（与 Ling::Color(uint32_t) 一致）。
+		/// 解析失败返回 nullopt 让调用方兜底。
 		std::optional<uint32_t> parseColorImpl(const std::wstring& s)
 		{
 			if (s.size() < 7 || s[0] != L'#') return std::nullopt;
@@ -78,7 +79,10 @@ namespace zdock {
 				if (d < 0) return std::nullopt;
 				v = (v << 4) | static_cast<uint32_t>(d);
 			}
-			if (s.size() == 7)  return v | 0xFF000000u;   // 没给 alpha 就当作不透明
+			// ⚠ alpha 在**低**字节（0xRRGGBBAA）—— 写成 `| 0xFF000000` 会把 alpha
+			//   塞进 R 的位置，得到"红色且几乎全透明"。这个字节序跟
+			//   `Ling::Color(uint32_t)` 保持一致，改一处必须改两处。
+			if (s.size() == 7)  return v | 0x000000FFu;   // 没给 alpha 就当作不透明
 			if (s.size() == 9)  return v;
 			return std::nullopt;
 		}
@@ -199,6 +203,29 @@ namespace zdock {
 			}
 		}
 
+		// 阶段六：位置 / 外观 / 自启
+		auto readEnum = [&](const wchar_t* name, std::wstring& cur,
+			std::initializer_list<const wchar_t*> allowed) {
+			if (!obj.HasKey(name)) return;
+			const auto s = std::wstring{ obj.GetNamedString(name, L"") };
+			if (s.empty()) return;
+			for (const wchar_t* a : allowed) {
+				if (s == a) { cur = s; return; }
+			}
+			// 认不出来的值：记一行日志、保留当前（默认）值，不拖垮整份配置
+			std::wstring list;
+			for (const wchar_t* a : allowed) { if (!list.empty()) list += L" / "; list += a; }
+			log(std::format(L"[config] {} = \"{}\" 不是 {} 之一，用默认 \"{}\"", name, s, list, cur));
+			};
+		readEnum(L"dockEdge", dockEdge, { L"bottom", L"top", L"left", L"right" });
+		readEnum(L"dockAlign", dockAlign, { L"start", L"center", L"end" });
+
+		dockOffset = static_cast<float>(obj.GetNamedNumber(L"dockOffset", dockOffset));
+		opacity = static_cast<float>(obj.GetNamedNumber(L"opacity", opacity));
+		showIndicator = readBool(L"showIndicator", showIndicator);
+		autoStart = readBool(L"autoStart", autoStart);
+		monitorIndex = static_cast<int>(obj.GetNamedNumber(L"monitorIndex", monitorIndex));
+
 		items.clear();
 		if (obj.HasKey(L"items")) {
 			try {
@@ -241,6 +268,13 @@ namespace zdock {
 		gate(hoverScale, 1.f, 4.f, 1.7f, L"hoverScale");
 		gate(bottomMargin, 0.f, 400.f, 6.f, L"bottomMargin");
 		gate(cornerRadius, 0.f, 128.f, 12.f, L"cornerRadius");
+		// 阶段六
+		gate(dockOffset, -10000.f, 10000.f, 0.f, L"dockOffset");
+		gate(opacity, 0.5f, 0.95f, 0.8f, L"opacity");
+		if (monitorIndex < -1 || monitorIndex > 15) {
+			log(std::format(L"[config] monitorIndex = {} 超出 [-1, 15]，回默认 -1（跟随）", monitorIndex));
+			monitorIndex = -1;
+		}
 		if (animMs < 0 || animMs > 2000) {
 			log(std::format(L"[config] animMs = {} 超出 [0, 2000]，回默认 150", animMs));
 			animMs = 150;
@@ -260,9 +294,10 @@ namespace zdock {
 			slideOutMs = 300;
 		}
 
-		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={} autoHide={} reserve={} hideFull={}",
+		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={} autoHide={} reserve={} hideFull={} edge={} align={} offset={:.0f} opacity={:.2f} monitor={}",
 			iconSize, iconGap, hoverScale, animMs, bottomMargin, items.size(),
-			autoHide ? 1 : 0, reserveWorkArea ? 1 : 0, hideOnFullscreen ? 1 : 0));
+			autoHide ? 1 : 0, reserveWorkArea ? 1 : 0, hideOnFullscreen ? 1 : 0,
+			dockEdge, dockAlign, dockOffset, opacity, monitorIndex));
 	}
 
 	std::string Config::toJson() const
@@ -287,6 +322,16 @@ namespace zdock {
 		root.SetNamedValue(L"slideOutMs", JsonValue::CreateNumberValue(slideOutMs));
 		root.SetNamedValue(L"hideOnFullscreen", JsonValue::CreateBooleanValue(hideOnFullscreen));
 		root.SetNamedValue(L"reserveWorkArea", JsonValue::CreateBooleanValue(reserveWorkArea));
+
+		// 阶段六：位置 / 外观 / 自启。默认值都对应"和 0.1.5 完全一样的行为"，
+		// 所以老用户升级后观感不变。
+		root.SetNamedValue(L"dockEdge", JsonValue::CreateStringValue(dockEdge));
+		root.SetNamedValue(L"dockAlign", JsonValue::CreateStringValue(dockAlign));
+		root.SetNamedValue(L"dockOffset", JsonValue::CreateNumberValue(dockOffset));
+		root.SetNamedValue(L"opacity", JsonValue::CreateNumberValue(opacity));
+		root.SetNamedValue(L"showIndicator", JsonValue::CreateBooleanValue(showIndicator));
+		root.SetNamedValue(L"autoStart", JsonValue::CreateBooleanValue(autoStart));
+		root.SetNamedValue(L"monitorIndex", JsonValue::CreateNumberValue(monitorIndex));
 
 		JsonArray arr;
 		for (const auto& it : items) {
