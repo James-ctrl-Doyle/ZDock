@@ -81,7 +81,17 @@ def chunk(tag, data):
 
 
 def write_png(path, w, h, bgra):
-    raw = b''.join(b'\x00' + bgra[y * w * 4:(y + 1) * w * 4] for y in range(h))
+    # ⚠⚠ 输入是 Windows DIB 的 **BGRA** 顺序，而下面 IHDR 声明的颜色类型是 6（**RGBA**）——
+    #   不做转换就会把 R 和 B 写到对方的槽里，**整张截图的颜色都是反的**。
+    #   踩过：设置窗口里 `#1F5C7A`（深青）的按钮在截图里显示成金褐色 `#7A5C1F`，
+    #   而直接读像素是 31/92/122 —— 对的。害我去查了一圈"是不是 Ling 把颜色搞反了"。
+    #   按行做（顺手插 PNG 需要的 filter 字节）。
+    rows = []
+    for y in range(h):
+        row = bytearray(bgra[y * w * 4:(y + 1) * w * 4])
+        row[0::4], row[2::4] = row[2::4], row[0::4]   # B<->R
+        rows.append(b'\x00' + bytes(row))
+    raw = b''.join(rows)
     ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
     png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr)
            + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))

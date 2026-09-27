@@ -2,12 +2,12 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段六进行中 —— 已完成「位置配置」（v0.1.6）**，设置窗口 / 滚轮调大小 /
-开机自启 / 多显示器锚定待做。
-（v0.1.4、v0.1.5 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
+当前进度：**阶段六（位置配置 / 设置窗口 / 开机自启 / 多显示器锚定）已完成（v0.1.7）**，
+阶段七（本地化 + 崩溃恢复 + 诊断导出）未开始。
+（v0.1.4 ~ v0.1.7 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
-拖放 14 项、预览 13 项、位置配置 18 项探针全 PASS；过程中挖出的 bug 已根因级修复，
-见 `CHANGELOG.md`）。
+拖放 14 项、预览 13 项、位置配置 18 项、设置/自启/显示器 17 项探针全 PASS；
+过程中挖出的 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
 
@@ -52,6 +52,11 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
   显示该应用窗口的**实时画面**（DWM 缩略图，零截图成本、不用定时刷新）；移开即收起。
 - **拖文件打开**：拖文件到程序图标上松手 → 用该程序打开；到文件夹图标 → 复制进去。
   实现靠**子类化 dock 窗口**拿 `WM_DROPFILES`（Ling 不暴露消息口）。
+- **设置窗口**（`Src/SettingsWin.*`）：右键空白处 →「设置…」，**自绘**（Ling 的
+  Button / Slider / Label），四组 13 项，**改动即时生效**、关窗时写回 config.json。
+- **开机自启**（`Src/AutoStart.*`）：HKCU Run 项，不需要管理员权限。
+- **多显示器锚定**（`Src/MonitorUtil.*`）：`monitorIndex` 可选锚到哪台显示器，
+  越界自动回主屏。定位基准一律 `rcMonitor`。
 - 独立顶层窗口：`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，不进 Alt+Tab、点击不抢焦点
 - 启动日志写 exe 同目录 `ZDock.log`（UTF-8，1MB 轮转）
 - 单实例：**自己命名的 mutex**（`Src/SingleInstance.*`）——
@@ -184,8 +189,8 @@ exe 同目录的 `config.json`，首次启动自动生成。全部字段与默�
   "dockOffset": 0,         // 沿停靠边的偏移（逻辑像素）；正数朝"末端"方向
   "opacity": 0.8,          // 面板不透明度，[0.5, 0.95]（bgColor 只贡献 RGB）
   "showIndicator": true,   // 是否显示运行指示器
-  "autoStart": false,      // 开机自启（尚未实现，见「已知限制」）
-  "monitorIndex": -1,      // 显示器锚定（尚未实现，见「已知限制」）
+  "autoStart": false,      // 开机自启（写 HKCU\...\Run 的 ZDock 值）
+  "monitorIndex": -1,      // 显示器锚定：-1 = 跟随窗口所在显示器；>=0 = 锚第 N 台
   "items": [               // 图标列表；顺序即显示顺序
     { "path": "C:\\Windows\\explorer.exe" },
     { "path": "C:\\Windows\\System32\\notepad.exe", "name": "记事本" }
@@ -241,6 +246,8 @@ bash build-support/build.sh
 <python> build-support/_probe_drop.py                 # 拖文件到图标（14 项）
 <python> build-support/_probe_preview.py              # 悬停预览 / DWM 缩略图（13 项）
 <python> build-support/_probe_layout.py               # 位置配置：4 停靠边 / 对齐 / 偏移（18 项）
+<python> build-support/_probe_settings.py             # 设置窗口 / 自启 / 显示器锚定（17 项）
+bash build-support/_shot_settings.py                 # 阶段六截图 → build/_review/
 <python> build-support/_probe_ling_appid.sh           # 编出读 Ling::App::appID 的小工具（升级验证）
 <python> build-support/_probe_ling_build.sh <名>      # 编一个"Ling 窗口"探针（如 _probe_subclass）
 bash build-support/_probe_dwm_thumb.sh                # DWM 缩略图宿主可行性（纯 Win32）
@@ -300,6 +307,9 @@ Src/
   EdgeHotZone.h/.cpp  自动隐藏热区：贴屏幕底边的 3px 全透明细窗
   AppBarReserve.h/.cpp  工作区预留（AppBar）+ 强杀自愈 + 死记录清扫
   PreviewWin.h/.cpp   悬停预览气泡：DWM 缩略图做画面（独立顶层窗口）
+  SettingsWin.h/.cpp  设置窗口：自绘（Button / Slider / Label），改动即时生效
+  AutoStart.h/.cpp    开机自启：HKCU\...\Run 的 ZDock 值
+  MonitorUtil.h/.cpp  显示器枚举：给多显示器锚定提供 rcMonitor
   Config.h/.cpp       config.json 读写（默认值 / 兜底 / 原子替换）
   SingleInstance.h/.cpp  命名 mutex 单实例
   IconNode.h/.cpp     自绘图标节点：surface 绘制 + Composition 缩放动画 + 按下 / 弹跳 / 临时态
@@ -595,16 +605,51 @@ LRESULT CALLBACK DockWin::subclassProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 `DROPFILES` 结构 + 双 `\0` 结尾的文件名列表，自己 `GlobalAlloc` 造一个再
 `PostMessage` 就行（`_probe_drop.py` 就是这么做到全自动的）。
 
+### ⚠ 验收截图曾经**颜色全是反的**（工具的错，不是程序的）
+
+`write_png()` 拿到的是 Windows DIB 的 **BGRA**，却直接按 PNG 的 **RGBA** 写
+（IHDR 里声明的颜色类型就是 6 = RGBA）——**R 和 B 从头到尾在对方的槽里**。
+这个 bug 从阶段一的截图脚本就在，一路带到阶段五。
+
+症状极具误导性：设置窗口里 `#1F5C7A`（深青）的按钮在截图里是**金褐色** `#7A5C1F`，
+第一反应必然是"Ling 把颜色通道搞反了"。而直接读窗口像素是 `R=31 G=92 B=122` ——
+**完全正确**。绕了一圈才发现是截图在骗人。
+
+**教训**：验收用的工具本身也要能自证。判断"颜色对不对"这种问题，
+**直接读像素**比看截图可靠 —— 截图多过一道编码，就多一个出错的地方
+（和"验证要看最终效果、别只看中间信号"是同一条，只不过这次是反过来：
+**中间信号（截图）错了，最终效果（像素）才是对的**）。
+
+### 设置窗口：改动即时生效走的是**轻量重排**
+
+`applyLiveConfig()` —— 只重排、**不重建图标节点**。别拿 `reloadConfig()` 干这事：
+它会 `rebuild()` 把每个图标节点删掉重建，拖滑块时每动一下就重建一次，既卡又闪。
+
+窗口可拖动靠 `onHitTest` 在标题条区域返回 `HTCAPTION`（自绘窗口拖着走的标准做法），
+但**关闭按钮那一小块要排除在外**，否则它永远是标题栏、点不到。
+
+⚠ `choiceRow` 里踩过一个坑：把 `initializer_list` 参数**按值捕获**进
+延迟执行的刷新回调里 = 抓了一把悬空指针（`initializer_list` 只在当前语句的临时数组活着）。
+要先把选项抄进 `std::vector` 再捕获。
+
+### 开机自启：两个容易静默失败的点
+
+1. **值必须带引号**。路径带空格时不加引号，Windows 会把空格前的部分当程序名，
+   开机**静默启动失败** —— 用户只会觉得"自启没生效"，不会看到任何报错。
+   统一加引号（不带空格时也无害）。
+2. **`GetModuleFileNameW` 的 MAX_PATH 截断**。长路径下它会截断并返回 MAX_PATH，
+   拿到的路径末尾缺一截、写进注册表就再也启动不起来。要"返回长度顶到缓冲区上限就翻倍重试"。
+
+设置窗口里那一项的 getter 读**注册表真值**（`autostart::isEnabled()`）而不是配置字段 ——
+用户可能在任务管理器里关过自启，那才是事实；setter 两个都写，保证配置那份不漂。
+
 ## 已知限制 / 下一步
 
-- **阶段六还没做完**，剩余三块：
-  1. **设置窗口**（任务书 §2 #25）—— 目前所有可调项都只能手改 `config.json`。
-     Ling 有 `Button` / `Slider` / `Label` / `TextBox` / `ScrollerBox`（没有 CheckBox/ComboBox，
-     开关用 Button 自绘、选项用 Button 组），所以走**自绘**是可行的 ——
-     也符合这个项目一贯不引系统控件外观的做法。
-  2. **滚轮调大小**（§2 #24）：悬停在 dock 上滚轮 → 图标基准 32~128 实时调。
-  3. **开机自启**（§2 #26，HKCU Run）与**多显示器锚定**（§2 #31）。
-     `autoStart` / `monitorIndex` 两个配置字段已经占好位（能读能写），只是还没接实现。
+- **滚轮调大小没做**（任务书 §2 #24）—— 用户明确说不需要这一项。
+- **多显示器锚定只在一台显示器上验过**：本机只有一台屏，所以探针验的是
+  "`monitorIndex=0` 与 `-1` 等价"和"越界退回主屏"。真正插两块屏、改混合 DPI 的效果
+  还需要实机确认（`MonitorUtil` 用的是 `rcMonitor`，理论上混合 DPI 下位置不会偏，
+  但**没实测过**）。设置窗口里显示器选项在多屏时才列出来。
 - **多窗口预览还是"取第一个窗口"**，没做成任务书 §2 #17 / #16 说的**列表**
   （每窗口一张缩略图 + 标题）。单窗口预览、画面来源、位置都通了，列表是排列与
   多缩略图管理的事，下一步补。

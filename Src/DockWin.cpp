@@ -1,5 +1,7 @@
 #include "DockWin.h"
+#include "AutoStart.h"
 #include "Config.h"
+#include "MonitorUtil.h"
 #include "IconLoader.h"
 #include "Log.h"
 #include <include/App.h>
@@ -26,6 +28,8 @@ namespace zdock {
 		tracker.stop();
 		// 悬停预览：注销 DWM 缩略图（那是系统持有的句柄，不主动注销会一直挂着）
 		preview.hidePreview();
+		// 设置窗口：关掉时会把配置写回 config.json
+		settings.close();
 		// 热区窗口是独立顶层窗口，也得显式销毁（它不属于 Ling 的窗口体系）
 		hotZone.destroy();
 		// AppBar 注销：不注销的话工作区会一直缩着，用户得重启 explorer 才好。
@@ -112,6 +116,27 @@ namespace zdock {
 		cfgOffset = cfg->dockOffset;
 		cfgOpacity = cfg->opacity;
 		cfgShowIndicator = cfg->showIndicator;
+		cfgMonitorIndex = cfg->monitorIndex;
+		cfgAutoStart = cfg->autoStart;
+	}
+
+	void DockWin::applyLiveConfig()
+	{
+		applyConfig();
+
+		// 外观类的东西可以直接改节点属性，不必重建节点
+		if (panel) {
+			const uint32_t c = Config::get()->bgColorValue();
+			const uint32_t a = static_cast<uint32_t>(
+				std::lround(std::clamp(cfgOpacity, 0.f, 1.f) * 255.f));
+			panel->setBg(Ling::Color((c & 0xFFFFFF00u) | a));
+			panel->setBorderRadius(Config::get()->cornerRadius);
+		}
+
+		// 尺寸 / 位置 / 排列方向 / 指示器位置 —— 一套重排全带走
+		relayoutForItemCount();
+		refreshIndicators();
+		applyAutoHideConfig();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -272,6 +297,25 @@ namespace zdock {
 
 		// 悬停预览气泡（阶段五）：窗口**按需**创建 —— 没人悬停就别建。
 		preview.onLog = [](const std::wstring& s) { log(s); };
+
+		// 设置窗口（阶段六）：改动即时生效 —— 直接走 applyLiveConfig（只重排、不重建）
+		settings.onLog = [](const std::wstring& s) { log(s); };
+		settings.onLiveChanged = [this] {
+			applyLiveConfig();
+			// 设置窗口开着的时候别把 dock 收走 —— 用户正盯着它看改动的效果
+			if (settings.isOpen()) keepVisible();
+			};
+
+		// 开机自启：以配置为准同步一次注册表。
+		// ⚠ 放在这儿而不是 main.cpp —— 配置是在 create() 里才载入的，
+		//   在 main 里读 Config 会拿到还没载入的默认值。
+		//   用户可能直接手改过 config.json（或从别处关掉过自启），这里对齐一次。
+		if (autostart::sync(cfgAutoStart)) {
+			if (cfgAutoStart) log(L"[autostart] 启动时已确保自启开启");
+		}
+		else {
+			log(L"[autostart] 启动时同步自启失败（注册表不可写？）");
+		}
 
 		layout();   // 立刻布一次局，别等第一次 WM_PAINT
 		updateHitRegion();   // 初始命中区域 = 面板本体（halo 完全不参与命中）
@@ -690,20 +734,23 @@ namespace zdock {
 	{
 		HMENU menu = CreatePopupMenu();
 		if (!menu) return;
+		AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置…");
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加程序…");
 		AppendMenuW(menu, MF_STRING, kMenuReload, L"重新载入配置");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.6 · 位置配置 / 悬停预览 / 拖放");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.7 · 设置窗口 / 位置配置 / 悬停预览");
 
 		POINT pt{};
 		GetCursorPos(&pt);
 		const UINT cmd = popupMenuHere(menu, pt);
 		switch (cmd) {
-		case kMenuExit:   Ling::App::get()->quit(0); break;
-		case kMenuReload: reloadConfig();            break;
-		case kMenuAdd:    addItem();                 break;
+		case kMenuExit:     Ling::App::get()->quit(0); break;
+		case kMenuReload:   reloadConfig();            break;
+		case kMenuAdd:      addItem();                 break;
+		case kMenuSettings: settings.open();           break;
 		default: break;
 		}
 	}
@@ -1398,6 +1445,13 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	RECT DockWin::monitorRect() const
 	{
+		// 阶段六：配了显示器序号就锚那一台（任务书 §2 #31）；
+		// -1（默认）= 跟随窗口当前所在的显示器 —— 也就是加这个配置项之前的老行为。
+		if (cfgMonitorIndex >= 0) {
+			const RECT r = monitors::rectFor(cfgMonitorIndex);
+			if (r.right > r.left && r.bottom > r.top) return r;
+		}
+
 		HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 		MONITORINFO mi{};
 		mi.cbSize = sizeof(mi);
@@ -1563,6 +1617,13 @@ namespace zdock {
 	// ⚠ 别只重算位置：`px()` 依赖 `dpi`，dpi 变了窗口尺寸也得重算，否则图标会
 	//   在大屏上显示成小尺寸（或者反过来）。
 	// ---------------------------------------------------------------------------
+	void DockWin::openSettings()
+	{
+		settings.open();
+		// 设置窗口开着的时候 dock 必须留在屏幕上 —— 用户要一边改一边看效果
+		keepVisible();
+	}
+
 	void DockWin::relayoutForEnvironment()
 	{
 		if (!hwnd) return;
@@ -1995,6 +2056,11 @@ namespace zdock {
 		DockWin* self = s_self;
 		if (self && msg == WM_DROPFILES) {
 			self->onDropFiles(reinterpret_cast<HDROP>(wp));
+			return 0;
+		}
+		// 测试注入通道：打开设置窗口（探针点不到菜单，见头文件里的说明）
+		if (self && msg == kMsgOpenSettings) {
+			self->openSettings();
 			return 0;
 		}
 		// ⚠ 其余消息**必须**原样转回 Ling 的窗口过程 —— 不转的话 dock 会

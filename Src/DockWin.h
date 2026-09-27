@@ -6,6 +6,7 @@
 #include "EdgeHotZone.h"
 #include "AppBarReserve.h"
 #include "PreviewWin.h"
+#include "SettingsWin.h"
 #include <vector>
 #include <string>
 #include <filesystem>
@@ -78,6 +79,7 @@ namespace zdock {
 		static constexpr int   kMenuPin = 107;        // 把临时图标固定下来
 		static constexpr int   kMenuCloseWindow = 108; // 关掉分组里的某个窗口
 		static constexpr int   kMenuCloseGroup = 109;  // 关掉分组里所有窗口
+		static constexpr int   kMenuSettings = 110;    // 打开设置窗口（阶段六）
 
 		// 运行指示器：图标正下方的 4px 圆点（逻辑像素）。
 		// ⚠ 它必须画在**独立节点**上（IndicatorNode），不能挤进 IconNode 的
@@ -136,6 +138,15 @@ namespace zdock {
 		void rebuild();
 		/// <summary>重新读 config.json 后重建（用户手改配置不必重启进程）。</summary>
 		void reloadConfig();
+
+		/// <summary>
+		/// 设置窗口专用：配置已经改在内存里了，**只重排、不重建图标节点** ——
+		/// 用于只动尺寸/位置/外观的项（图标大小、间距、停靠边、不透明度……）。
+		///
+		/// ⚠ 别拿 `reloadConfig()` 干这事：它会 `rebuild()` 把每个图标节点删掉重建，
+		///   拖滑块时每动一下就重建一次，既卡又闪。
+		/// </summary>
+		void applyLiveConfig();
 
 		// ---- 阶段三：窗口跟踪 / 运行状态 ----
 		/// <summary>启动跟踪器并挂回调。create() 里调一次。</summary>
@@ -201,6 +212,19 @@ namespace zdock {
 		/// 重算尺寸位置，并把热区、AppBar 一起带过去。保持当前的显示/隐藏状态。
 		/// </summary>
 		void relayoutForEnvironment();
+
+		/// <summary>打开设置窗口（右键菜单项走这条；测试注入也走这条）。</summary>
+		void openSettings();
+
+		/// <summary>
+		/// 测试注入：让 dock 打开设置窗口。
+		///
+		/// ⚠ 探针没法"点菜单" —— 那要先 SetCursorPos 把光标挪到 dock 上再模拟点击，
+		///   会抢用户的输入焦点（本项目的一条红线）。所以留一个消息口，
+		///   和 WindowTracker 的全屏注入（`WM_APP+100`）是同一套路。
+		/// 投到 dock 主窗口上，由 subclassProc 拦下来。
+		/// </summary>
+		static constexpr UINT kMsgOpenSettings = WM_APP + 101;
 
 		// ---- 自动隐藏状态机 ----
 
@@ -376,6 +400,8 @@ namespace zdock {
 		float cfgOffset{ 0.f };          // 沿边偏移（逻辑像素）
 		float cfgOpacity{ 0.8f };        // 面板不透明度
 		bool  cfgShowIndicator{ true };  // 是否显示运行指示器
+		int   cfgMonitorIndex{ -1 };     // 显示器锚定：-1 = 跟随窗口所在显示器
+		bool  cfgAutoStart{ false };     // 开机自启（配置值，注册表的真值在 AutoStart）
 
 		SlideState slideState{ SlideState::Shown };
 		/// 滑动的进度（0 = 完全展开，1 = 完全滑出）与本次滑动的起止/时刻
@@ -398,6 +424,9 @@ namespace zdock {
 		PreviewWin preview;
 		/// 300ms 预览延迟的定时器是否挂着
 		bool previewTimerOn{ false };
+
+		/// 设置窗口（阶段六，自绘 —— 见 SettingsWin.h）
+		SettingsWin settings;
 
 		/// 当前是否有全屏应用在前台。来源 = WindowTracker 的 onFullscreenChanged
 		/// （自动化测试也会通过热区的注入通道喂它，见 EdgeHotZone::onTestInject）。
