@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+// ⚠ 前向声明要在 namespace zdock **外面** —— 写到里面会变成 zdock::Ling::TextBox，
+//   和真正的 Ling::TextBox 不是一个类型。
+namespace Ling { class TextBox; }
+
 namespace zdock {
 
 	class DockWin;
@@ -72,6 +76,9 @@ namespace zdock {
 		/// 拖动滑块时的中间值（滑块只认 float，配置里有 int 字段）
 		std::vector<std::function<void()>> refreshers;
 
+		/// 所有数值输入框 —— 回车时要把"当前聚焦的那个"失焦（失焦才触发解析应用）
+		std::vector<Ling::TextBox*> numericBoxes;
+
 		bool opened{ false };
 
 		// 尺寸（逻辑像素）
@@ -86,7 +93,7 @@ namespace zdock {
 		static constexpr float kRowH = 34.f;
 		static constexpr float kSectionH = 38.f;
 		static constexpr float kLabelW = 150.f;
-		static constexpr float kSliderW = 220.f;
+		static constexpr float kSliderW = 150.f;
 		static constexpr float kBtnW = 62.f;
 	};
 

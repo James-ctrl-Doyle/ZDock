@@ -486,6 +486,18 @@ def main():
 
     # ---- 3. 渲染
     print('\n-- 3. 渲染 --')
+    # ⚠ 先记下用户光标在哪 —— 必须在这之后就把光标挪开，
+    #   否则最后"还原光标"会把它还到我们临时用的那个位置。
+    saved = wt.POINT()
+    u32.GetCursorPos(ctypes.byref(saved))
+
+    # ⚠ 拍"空闲参考图"之前**必须先把光标移开**。
+    #   这个探针跑完会把光标还原到它开始时的位置 —— 如果那是上一次跑、
+    #   或者别的脚本留下的 dock 上某处，那么这张"空闲图"其实**已经带着放大**了，
+    #   后面拿它跟悬停图一比 → 差异 0 像素 → 误判成"放大动画没在画"。
+    #   （实测踩过：调试脚本把光标留在 dock 上，下一轮阶段一就报这条假失败。）
+    u32.SetCursorPos(4, 4)
+    time.sleep(0.35)
     idle_png = os.path.join(OUT_DIR, 'zdock_idle.png')
     idle = capture_window(hwnd, idle_png)
     check('PrintWindow 抓到窗口自绘内容', idle is not None, idle_png)
@@ -497,9 +509,6 @@ def main():
     panel_left = l + side_slack
     icon_y = b - int(round(8 * dpi)) - int(icon_base / 2)
     icon_centers = [int(panel_left + pad_x + i * (icon_base + gap) + icon_base / 2) for i in range(6)]
-
-    saved = wt.POINT()
-    u32.GetCursorPos(ctypes.byref(saved))
 
     u32.SetCursorPos(icon_centers[2], icon_y)
     time.sleep(0.45)

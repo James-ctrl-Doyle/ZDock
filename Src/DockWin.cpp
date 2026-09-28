@@ -26,8 +26,6 @@ namespace zdock {
 		// ⚠ 跟踪器的钩子必须在窗口销毁**之前**摘掉：它的回调会用到本对象，
 		//   对象没了还留着钩子就是悬空指针。
 		tracker.stop();
-		// 悬停预览：注销 DWM 缩略图（那是系统持有的句柄，不主动注销会一直挂着）
-		preview.hidePreview();
 		// 设置窗口：关掉时会把配置写回 config.json
 		settings.close();
 		// 热区窗口是独立顶层窗口，也得显式销毁（它不属于 Ling 的窗口体系）
@@ -149,6 +147,9 @@ namespace zdock {
 			DockItem item;
 			item.path = ci.path;
 			item.name = ci.name.empty() ? displayNameOf(ci.path) : ci.name;
+			// ⚠ 别漏了这一行：pinRight 决定这个节点进左组还是右组，
+			//   漏了的话"回收站"会排到左组里、临时图标反而跑到它右边。
+			item.pinRight = ci.pinRight;
 			items.push_back(std::move(item));
 		}
 		log(std::format(L"[dock] 配置里 {} 项，生效 {} 项", cfg->items.size(), items.size()));
@@ -212,13 +213,6 @@ namespace zdock {
 				//   （一次性定时器不是轮询，红线 4 允许。）
 				killTimer(kTimerRelayout);
 				relayoutForEnvironment();
-				return;
-			}
-			if (id == kTimerPreview) {
-				// 悬停满 300ms → 弹预览（任务书 §2 #17）
-				killTimer(kTimerPreview);
-				previewTimerOn = false;
-				showPreviewForHover();
 				return;
 			}
 			if (id != kTimerHover) return;
@@ -295,9 +289,6 @@ namespace zdock {
 			log(L"[drop] 已注册拖放受体（子类化 + DragAcceptFiles）");
 		}
 
-		// 悬停预览气泡（阶段五）：窗口**按需**创建 —— 没人悬停就别建。
-		preview.onLog = [](const std::wstring& s) { log(s); };
-
 		// 设置窗口（阶段六）：改动即时生效 —— 直接走 applyLiveConfig（只重排、不重建）
 		settings.onLog = [](const std::wstring& s) { log(s); };
 		settings.onLiveChanged = [this] {
@@ -366,27 +357,38 @@ namespace zdock {
 
 		row = body->makeChild<Ling::Node>();
 		row->setPositionType(Ling::Position::Absolute);
+		rowTemp = body->makeChild<Ling::Node>();
+		rowTemp->setPositionType(Ling::Position::Absolute);
+		rowRight = body->makeChild<Ling::Node>();
+		rowRight->setPositionType(Ling::Position::Absolute);
 
 		// 面板 / 图标行的位置、尺寸、排列方向全部随停靠边 —— 收口在这一个函数里
 		applyNodeLayout();
 
 		// 指示器**不放进 row** —— row 是 Flex 容器，多出来的节点会被当成第二个
 		// 图标参与排版。它们挂在 body 上，位置在 layout 完成后按图标坐标算。
+		//
+		// ⚠ 固定项按 pinRight 分到两个容器（左组 / 右组），这样"右组"能排到
+		//   临时图标后面去（见 rowTemp 的说明）。
 		for (size_t i = 0; i < items.size(); ++i) {
-			auto* node = row->makeChild<IconNode>();
+			auto& it = items[i];
+			Ling::Node* host = it.pinRight ? rowRight : row;
+			auto* node = host->makeChild<IconNode>();
 			node->setSize(cfgIconBase, cfgIconBase);
-			// 间距加在**沿边方向**：横向边是右间距，纵向边是下间距（见 applyNodeLayout）
-			if (i + 1 < items.size()) {
+			// 间距加在**沿边方向**：横向边是右间距，纵向边是下间距。
+			// ⚠ 判断"是不是本段最后一个"（段间距由 applyNodeLayout 补），
+			//   不能直接看"是不是 items 最后一个"。
+			if (!isLastInSegment(i)) {
 				if (horizontalEdge()) node->setMarginRight(cfgIconGap);
 				else node->setMarginBottom(cfgIconGap);
 			}
-			items[i].node = node;
+			it.node = node;
 
 			auto* dot = body->makeChild<IndicatorNode>();
 			dot->setPositionType(Ling::Position::Absolute);
 			dot->setSize(kIndicatorDia, kIndicatorDia);
 			dot->setOn(false);
-			items[i].indicator = dot;
+			it.indicator = dot;
 		}
 	}
 
@@ -482,106 +484,7 @@ namespace zdock {
 		applyHover(idx);
 		// 鼠标确实在图标上 → 确保兜底定时器开着；移开了 → 交给调用方关
 		if (idx >= 0) ensureHoverTimer(true);
-
-		// 阶段五：悬停预览。进入图标 → 起 300ms 计时；离开图标 → 立刻收。
-		// ⚠ 用"一次性定时器"实现延迟，不是轮询（任务书红线 4 的例外条款允许
-		//   "自身 UI 状态"的短定时器）。
-		//
-		// ⚠⚠ 每次悬停**变化**都要重置延迟，不能"只在首次进入时启动"：
-		//   用户在图标间快速扫视时，hover 会一直在某个图标上（每次都是 >= 0），
-		//   定时器如果不重置就会在 300ms 后到期 → 预览反复弹出、还反复切换目标
-		//   （每次切换都要 DWM 注册/注销缩略图）。实测把"悬停扫动"的 CPU
-		//   从 1.0% 推到 5.7%，观感上也在闪。
-		//   重置之后语义才对：**停住不动 300ms 才弹**。
-		if (idx >= 0) {
-			if (previewTimerOn) killTimer(kTimerPreview);
-			setTimer(kPreviewDelayMs, kTimerPreview);
-			previewTimerOn = true;
-			// 换到别的图标 → 先把上一个的预览收掉（目标变了，缩略图要重新注册）
-			preview.hidePreview();
-		}
-		else {
-			cancelPreview();
-		}
 		return true;
-	}
-
-	// ---------------------------------------------------------------------------
-	// 悬停预览（任务书 §2 #17）
-	// ---------------------------------------------------------------------------
-	void DockWin::cancelPreview()
-	{
-		if (previewTimerOn) {
-			killTimer(kTimerPreview);
-			previewTimerOn = false;
-		}
-		preview.hidePreview();
-	}
-
-	void DockWin::showPreviewForHover()
-	{
-		if (hoverIndex < 0 || hoverIndex >= static_cast<int>(items.size())) return;
-		const AppGroup* g = groupOfItem(hoverIndex);
-		if (!g || g->windows.empty()) {
-			// 没在跑的图标没有可预览的窗口（悬停只放大图标就够了）
-			return;
-		}
-
-		// 目标窗口：优先挑"可见且没最小化"的 —— DWM 缩略图对最小化窗口只能拿到
-		// 一张空画面，挑不出来就退回第一个（预览会显示成纯黑，至少位置/标题是对的）。
-		HWND target = nullptr;
-		for (HWND w : g->windows) {
-			if (IsWindow(w) && IsWindowVisible(w) && !IsIconic(w)) { target = w; break; }
-		}
-		if (!target) target = g->windows.front();
-
-		// 锚点：预览要浮在**朝屏幕中心那一侧**（和 halo 同侧、不挡图标），
-		// 具体哪一侧由停靠边决定。这里直接把"预览窗口的目标左上角"算出来，
-		// PreviewWin 只负责夹进屏幕。
-		// ⚠ node->x/y/w/h 都是**物理**像素、相对客户区，最后 ClientToScreen 转屏幕坐标。
-		const auto& it = items[hoverIndex];
-		const float d = (dpi > 0.f) ? dpi : 1.f;
-		const int pw = static_cast<int>(std::lround(PreviewWin::kWinW * d));
-		const int ph = static_cast<int>(std::lround(PreviewWin::kWinH * d));
-
-		int nx = 0, ny = 0, nw = 0, nh = 0;
-		if (it.node) {
-			nx = static_cast<int>(it.node->x);
-			ny = static_cast<int>(it.node->y);
-			nw = static_cast<int>(it.node->w);
-			nh = static_cast<int>(it.node->h);
-		}
-		else {
-			// 理论上有 node 才有图标可悬停；兜底给个面板内的位置
-			float ox = 0.f, oy = 0.f;
-			panelOrigin(ox, oy);
-			nx = static_cast<int>(ox * d);
-			ny = static_cast<int>(oy * d);
-			nw = nh = static_cast<int>(cfgIconBase * d);
-		}
-
-		POINT tl{};
-		switch (cfgEdge) {
-		case DockEdge::Bottom:   // 停靠底边 → 预览在图标上方
-			tl.x = nx + nw / 2 - pw / 2;
-			tl.y = ny - ph;
-			break;
-		case DockEdge::Top:      // 停靠顶边 → 预览在图标下方
-			tl.x = nx + nw / 2 - pw / 2;
-			tl.y = ny + nh;
-			break;
-		case DockEdge::Left:     // 停靠左边 → 预览在图标右侧
-			tl.x = nx + nw;
-			tl.y = ny + nh / 2 - ph / 2;
-			break;
-		case DockEdge::Right:    // 停靠右边 → 预览在图标左侧
-			tl.x = nx - pw;
-			tl.y = ny + nh / 2 - ph / 2;
-			break;
-		}
-		ClientToScreen(hwnd, &tl);
-
-		preview.showFor(target, g->displayName, tl);
 	}
 
 	void DockWin::applyHover(int index)
@@ -671,7 +574,31 @@ namespace zdock {
 	{
 		if (index < 0 || index >= static_cast<int>(items.size())) return;
 		const auto& item = items[index];
-		ShellExecuteW(nullptr, L"open", item.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+		if (isShellObjectPath(item.path)) {
+			// shell 虚拟对象（回收站 / 此电脑 / 控制面板……）没有 exe 路径，
+			// 也不能拿字符串直接 ShellExecute —— 要解析成 PIDL，再让 shell
+			// 按"虚拟项"去调用（SEE_MASK_IDLIST | SEE_MASK_INVOKEIDLIST）。
+			PIDLIST_ABSOLUTE pidl{};
+			if (SUCCEEDED(SHParseDisplayName(item.path.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) {
+				SHELLEXECUTEINFOW sei{};
+				sei.cbSize = sizeof(sei);
+				sei.fMask = SEE_MASK_IDLIST | SEE_MASK_INVOKEIDLIST | SEE_MASK_FLAG_NO_UI;
+				sei.lpVerb = L"open";
+				sei.lpIDList = pidl;
+				sei.nShow = SW_SHOWNORMAL;
+				if (!ShellExecuteExW(&sei)) {
+					log(std::format(L"[dock] 打开 {} 失败 err={}", item.path, GetLastError()));
+				}
+				CoTaskMemFree(pidl);
+			}
+			else {
+				log(std::format(L"[dock] 解析 shell 对象失败：{}", item.path));
+			}
+		}
+		else {
+			ShellExecuteW(nullptr, L"open", item.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		}
 
 		hoverIndex = -1;
 		applyHover(-1);
@@ -741,7 +668,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.7 · 设置窗口 / 位置配置 / 悬停预览");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.8 · 菜单合并 / 可输入数值");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -837,16 +764,34 @@ namespace zdock {
 		}
 		else {
 			AppendMenuW(menu, MF_STRING, kMenuOpen, L"打开");
-			AppendMenuW(menu, MF_STRING, kMenuOpenAdmin, L"以管理员身份打开");
+			// shell 虚拟对象（回收站等）没有"以管理员身份打开"这回事
+			if (!isShellObjectPath(items[index].path)) {
+				AppendMenuW(menu, MF_STRING, kMenuOpenAdmin, L"以管理员身份打开");
+			}
 			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 			AppendMenuW(menu, MF_STRING, kMenuRemove, L"从 Dock 移除");
 		}
+
+		// ---- dock 栏自身的命令 ----
+		// 用户反馈：原来只有右键点"图标之间的缝隙"才能弹出 dock 菜单，
+		// 那个可点范围只有几个像素、很难点中。所以把 dock 级命令也挂到图标菜单下面，
+		// 中间用分隔符隔开（上半段是这个程序的，下半段是整个 dock 的）。
+		//
+		// ⚠ 这里**不放"退出 ZDock"**：混在"移除 / 关闭全部窗口"旁边太容易误点，
+		//   而误点的代价是关掉整个 dock。退出仍然只在空白处菜单里。
+		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置…");
+		AppendMenuW(menu, MF_STRING, kMenuAdd, L"添加程序…");
+		AppendMenuW(menu, MF_STRING, kMenuReload, L"重新载入配置");
 
 		POINT pt{};
 		GetCursorPos(&pt);
 		const UINT cmd = popupMenuHere(menu, pt);
 		switch (cmd) {
 		case kMenuOpen:       launch(index);      break;
+		case kMenuSettings:   openSettings();     break;
+		case kMenuAdd:        addItem();          break;
+		case kMenuReload:     reloadConfig();     break;
 		case kMenuOpenAdmin:  launchAdmin(index); break;
 		case kMenuRemove:     removeItem(index);  break;
 		case kMenuPin:        pinItem(index);     break;
@@ -919,6 +864,8 @@ namespace zdock {
 		items.clear();
 		panel = nullptr;
 		row = nullptr;
+		rowTemp = nullptr;
+		rowRight = nullptr;
 
 		// body 是 Ling 的根节点，清空它 = 抹掉 panel / row / 所有 IconNode
 		if (body) body->removeAllChildren();
@@ -1094,7 +1041,8 @@ namespace zdock {
 			item.groupKey = g.key;
 
 			// 造型树上的节点。图标按峰值尺寸取（和固定项同一套规则）。
-			auto* node = row->makeChild<IconNode>();
+			// 临时图标一律进 rowTemp —— 它排在左固定组和右固定组之间
+			auto* node = rowTemp->makeChild<IconNode>();
 			node->setSize(cfgIconBase, cfgIconBase);
 			node->setTemporary(true);
 			item.node = node;
@@ -1170,12 +1118,12 @@ namespace zdock {
 	void DockWin::relayoutForItemCount()
 	{
 		// row 是 Flex 容器；间距是每个节点的沿边外边距。项数变了要重设一遍：
-		// 除最后一项外都要有间距。
+		// 除**本段**最后一项外都要有间距（段间距由 applyNodeLayout 补）。
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = items[i].node;
 			if (!node) continue;
 			node->setSize(cfgIconBase, cfgIconBase);
-			const float gap = (i + 1 < items.size()) ? cfgIconGap : 0.f;
+			const float gap = isLastInSegment(i) ? 0.f : cfgIconGap;
 			// ⚠ 间距要加在**沿边方向**：横向边 → 右间距；纵向边 → 下间距。
 			//   不然纵向停靠时图标会挤成一列没有间隙。
 			if (horizontalEdge()) {
@@ -1540,18 +1488,63 @@ namespace zdock {
 
 		// 行在面板内的偏移：**沿边方向**用 kPadX，**厚度方向**用 kPadY。
 		// 纵向停靠时两者换轴 —— 这一步最容易写反（面板宽是厚度、高是沿边长度）。
-		const float rx = ox + (horizontalEdge() ? kPadX : kPadY);
-		const float ry = oy + (horizontalEdge() ? kPadY : kPadX);
-		row->setPosition(Ling::Edge::Left, rx);
-		row->setPosition(Ling::Edge::Top, ry);
-		row->setSize(rowW(), rowH());
+		const float padAlong = horizontalEdge() ? kPadX : kPadY;
+		const float padAcross = horizontalEdge() ? kPadY : kPadX;
 
-		// 排列方向：横向边 Row（现有行为）、纵向边 Column
-		row->setFlexDirection(horizontalEdge() ? Ling::FlexDirection::Row : Ling::FlexDirection::Column);
-		// 交叉轴对齐：让图标靠"面板内侧"（远离屏幕边那一侧），
-		// 因为靠屏幕边那条留给了运行指示器。
-		//   bottom/top → 交叉轴是 Y；left → 图标靠右(FlexEnd)；right → 靠左(FlexStart)
-		row->setAlignItems(Ling::Align::FlexEnd);
+		// 三个行容器**各自沿边定位**，依次排开：
+		//   左固定项 | 临时项（正在运行的应用）| 右固定项
+		// 段的长度 = n*icon + (n-1)*gap；段与段之间再补一个 gap。
+		size_t nLeft = 0, nTemp = 0, nRight = 0;
+		segmentCounts(nLeft, nTemp, nRight);
+
+		float along = 0.f;
+		bool first = true;
+		auto place = [&](Ling::Node* r, size_t n) {
+			if (!r || n == 0) return;
+			const float len = n * cfgIconBase + (n - 1) * cfgIconGap;
+			if (!first) along += cfgIconGap;
+			first = false;
+
+			if (horizontalEdge()) {
+				r->setPosition(Ling::Edge::Left, ox + padAlong + along);
+				r->setPosition(Ling::Edge::Top, oy + padAcross);
+				r->setSize(len, cfgIconBase);
+				r->setFlexDirection(Ling::FlexDirection::Row);
+			}
+			else {
+				r->setPosition(Ling::Edge::Left, ox + padAcross);
+				r->setPosition(Ling::Edge::Top, oy + padAlong + along);
+				r->setSize(cfgIconBase, len);
+				r->setFlexDirection(Ling::FlexDirection::Column);
+			}
+			// 交叉轴对齐：让图标靠"面板内侧"，靠屏幕边那条留给运行指示器
+			r->setAlignItems(Ling::Align::FlexEnd);
+			along += len;
+			};
+
+		place(row, nLeft);
+		place(rowTemp, nTemp);
+		place(rowRight, nRight);
+	}
+
+	bool DockWin::isLastInSegment(size_t i) const
+	{
+		const auto& cur = items[i];
+		for (size_t j = i + 1; j < items.size(); ++j) {
+			const auto& n = items[j];
+			if (cur.pinRight == n.pinRight && cur.temporary == n.temporary) return false;
+		}
+		return true;
+	}
+
+	void DockWin::segmentCounts(size_t& left, size_t& temp, size_t& right) const
+	{
+		left = temp = right = 0;
+		for (const auto& it : items) {
+			if (it.temporary) ++temp;
+			else if (it.pinRight) ++right;
+			else ++left;
+		}
 	}
 
 	void DockWin::applyDockPlacement(int offset)
@@ -1795,8 +1788,16 @@ namespace zdock {
 		if (!hwnd) return false;
 		POINT pt{};
 		if (!GetCursorPos(&pt)) return false;
-		HWND under = WindowFromPoint(pt);
-		return under == hwnd;
+		if (WindowFromPoint(pt) == hwnd) return true;
+
+		// ⚠ 热区是**另一个窗口**（贴边的 3px 细窗，见 EdgeHotZone.h）。
+		//   从热区唤出 dock 时，光标还压在热区上、并不在 dock 上 ——
+		//   如果只看 hwnd，`tickSlide()` 结尾那次"该不该收"的判定会认为
+		//   "鼠标不在 dock 上"，于是 dock **刚滑进来又缩回去**。
+		//   用户看到的现象就是"碰屏幕底边只闪一下、根本唤不出来"。
+		//   所以"光标停在停靠边的热区里"也要算成"贴着 dock"。
+		const RECT hz = hotZoneRect();
+		return PtInRect(&hz, pt) != 0;
 	}
 
 	// ---------------------------------------------------------------------------

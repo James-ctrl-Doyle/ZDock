@@ -7,6 +7,7 @@
 #include <include/Button.h>
 #include <include/Label.h>
 #include <include/Slider.h>
+#include <include/TextBox.h>
 
 #include <algorithm>
 #include <cmath>
@@ -91,14 +92,6 @@ namespace zdock {
 		lab->setFontSize(13.f);
 		lab->setColor(Color(kText));
 
-		// 数值标签（靠右，显示当前值）
-		auto* val = body->makeChild<Label>();
-		val->setPositionType(Ling::Position::Absolute);
-		val->setPosition(Ling::Edge::Left, kPadX + kLabelW + kSliderW + 10.f);
-		val->setPosition(Ling::Edge::Top, y + 7.f);
-		val->setFontSize(13.f);
-		val->setColor(Color(kTextDim));
-
 		auto* sl = body->makeChild<Slider>();
 		sl->setPositionType(Ling::Position::Absolute);
 		sl->setPosition(Ling::Edge::Left, kPadX + kLabelW);
@@ -119,18 +112,70 @@ namespace zdock {
 		auto fmt = [fractional](float v) {
 			return fractional ? std::format(L"{:.2f}", v) : std::format(L"{:.0f}", v);
 			};
-		val->setText(fmt(getter()));
 
-		sl->onValueChanged.add([this, setter, val, fmt](Slider*, float v) {
+		// ---- 数值输入框 ----
+		// 用可输入的 TextBox 而不是只读标签：拖滑块只能拖个大概，
+		// 想精确改成某个值（比如正好 64）得手输。两者**双向联动**。
+		auto* box = body->makeChild<Ling::TextBox>();
+		box->setPositionType(Ling::Position::Absolute);
+		box->setPosition(Ling::Edge::Left, kPadX + kLabelW + kSliderW + 12.f);
+		box->setPosition(Ling::Edge::Top, y + 5.f);
+		box->setSize(64.f, 26.f);
+		box->setFontSize(13.f);
+		box->setVerticalCenter(true);
+		box->setPaddingLeft(7.f);
+		box->setPaddingRight(4.f);
+		box->setBg(Color(kTrack));
+		box->setBorderRadius(5.f);
+		box->setColor(Color(kText));
+		box->setCaretColor(Color(kAccent));
+		box->setSelectionBgColor(Color(0x4CC2FF55));
+		box->setText(fmt(getter()));
+		numericBoxes.push_back(box);
+
+		sl->onValueChanged.add([this, setter, box, fmt](Slider*, float v) {
 			setter(v);
-			val->setText(fmt(v));
+			box->setText(fmt(v));       // 拖滑块 → 输入框跟着变
 			if (onLiveChanged) onLiveChanged();
 			});
+
+		// 输入框 → 滑块：**失焦时**才解析应用（输入过程中每敲一个字符就改配置太跳）。
+		// 按回车也算确认 —— WinBase::onKeyDown 里拦一下让它失焦（见 buildUi 末尾）。
+		box->onFocusChanged.add([this, box, getter, setter, sl, min, max, step, fmt](
+			Ling::TextBox*, bool focused) {
+			if (focused) return;
+
+			const std::wstring cur = box->getText();
+			// 从文本里抠出数字。step < 1 的项才允许小数点；
+			// 其余（"限制为整数"那些）小数点直接被丢掉。
+			const bool allowDot = (step < 0.95f);
+			std::wstring digits;
+			bool neg = false;
+			for (wchar_t c : cur) {
+				if (c == L'-' && digits.empty()) { neg = true; continue; }
+				if (c >= L'0' && c <= L'9') { digits += c; continue; }
+				if (allowDot && c == L'.' && digits.find(L'.') == std::wstring::npos) digits += c;
+			}
+
+			float v = getter();
+			if (!digits.empty() && digits != L".") {
+				try { v = std::stof(digits); }
+				catch (const std::exception&) { v = getter(); }
+				if (neg) v = -v;
+			}
+			// 夹紧到滑块的范围：手输 999 不该把面板撑爆
+			v = std::clamp(v, min, max);
+			setter(v);
+			box->setText(fmt(v));       // 规范化回写（顺便清掉非法字符）
+			sl->setValue(v);            // ⚠ 值没变的话 Slider 不会再触发 onValueChanged
+			if (onLiveChanged) onLiveChanged();
+			});
+
 		// 记住"刷新"动作，供 syncFromConfig 用
-		refreshers.push_back([sl, val, getter, fmt] {
+		refreshers.push_back([sl, box, getter, fmt] {
 			const float v = getter();
 			sl->setValue(v);
-			val->setText(fmt(v));
+			box->setText(fmt(v));
 			});
 		return y + kRowH;
 	}
@@ -394,6 +439,18 @@ namespace zdock {
 	void SettingsWin::buildUiOnce()
 	{
 		buildUi();
+
+		// 回车 = 确认：让当前聚焦的数值输入框失焦，触发"解析 + 应用"。
+		// ⚠ 挂在**窗口**的 onKeyDown 上。TextBox 自己也订阅了同一个事件，
+		//   它会先把回车当换行插进文本 —— 但解析时会忽略非数字字符（L'\n'），
+		//   所以那条换行没有任何副作用，不用去拦。
+		this->onKeyDown.add([this](UINT key) {
+			if (key != VK_RETURN) return;
+			for (auto* b : numericBoxes) {
+				if (b && b->isFocused()) { b->blur(); break; }
+			}
+			});
+
 		syncFromConfig();
 	}
 

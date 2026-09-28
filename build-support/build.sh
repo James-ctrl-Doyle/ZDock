@@ -64,7 +64,6 @@ SRCS=(
     "$ROOT/Src/WindowTracker.cpp"
     "$ROOT/Src/EdgeHotZone.cpp"
     "$ROOT/Src/AppBarReserve.cpp"
-    "$ROOT/Src/PreviewWin.cpp"
     "$ROOT/Src/AutoStart.cpp"
     "$ROOT/Src/MonitorUtil.cpp"
     "$ROOT/Src/SettingsWin.cpp"

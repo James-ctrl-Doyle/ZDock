@@ -213,10 +213,17 @@ namespace zdock {
 		hookNameChange = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
 			nullptr, &WindowTracker::winEventProc, 0, 0,
 			WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+		// 为什么还需要它：把**当前**窗口全屏化（F11 / 双击标题栏 / 播放器全屏按钮）
+		// **不会换前台窗口**，shell 也就不发 WINDOWACTIVATED —— 只靠那个事件判不出
+		// "刚变成全屏"。加这条之后，前台窗口一变形就重判。
+		// ⚠ 事件本身很频繁，回调里只对前台窗口做一次廉价的矩形比较（见 winEventProc）。
+		hookLocation = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+			nullptr, &WindowTracker::winEventProc, 0, 0,
+			WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-		log(std::format(L"[track] 已启动 shellHookMsg=0x{:04X} taskbarCreatedMsg=0x{:04X} hooks={}/{}/{}",
+		log(std::format(L"[track] 已启动 shellHookMsg=0x{:04X} taskbarCreatedMsg=0x{:04X} hooks={}/{}/{}/{}",
 			shellHookMsg, taskbarCreatedMsg,
-			(bool)hookMinimizeStart, (bool)hookMinimizeEnd, (bool)hookNameChange));
+			(bool)hookMinimizeStart, (bool)hookMinimizeEnd, (bool)hookNameChange, (bool)hookLocation));
 		return true;
 	}
 
@@ -225,6 +232,7 @@ namespace zdock {
 		if (hookMinimizeStart) { UnhookWinEvent(hookMinimizeStart); hookMinimizeStart = nullptr; }
 		if (hookMinimizeEnd) { UnhookWinEvent(hookMinimizeEnd);     hookMinimizeEnd = nullptr; }
 		if (hookNameChange) { UnhookWinEvent(hookNameChange);       hookNameChange = nullptr; }
+		if (hookLocation) { UnhookWinEvent(hookLocation);           hookLocation = nullptr; }
 		if (msgHwnd) {
 			DeregisterShellHookWindow(msgHwnd);
 			DestroyWindow(msgHwnd);
@@ -703,6 +711,20 @@ namespace zdock {
 				// 标题变化很频繁（比如浏览器切标签），不必每次都通知 UI 重绘，
 				// 只在标题真的变了时才回调。
 				if (self->onChanged) self->onChanged();
+			}
+			break;
+		}
+		case EVENT_OBJECT_LOCATIONCHANGE: {
+			// 窗口位置 / 大小变了。**只关心前台窗口** —— 它决定"是不是全屏"。
+			// ⚠ 节流 100ms：拖动窗口 / 播视频时这事件每秒几十上百次，
+			//   不做节流空闲 CPU 会被抬到阶段一的 1% 红线上面去（实测踩过）。
+			//   漏不掉最终状态 —— 停下之后还会有事件进来。
+			if (self->foreground == hwnd) {
+				const ULONGLONG now = GetTickCount64();
+				if (now - self->lastLocationCheck >= 100) {
+					self->lastLocationCheck = now;
+					self->updateFullscreen(hwnd);
+				}
 			}
 			break;
 		}

@@ -2,7 +2,7 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段六（位置配置 / 设置窗口 / 开机自启 / 多显示器锚定）已完成（v0.1.7）**，
+当前进度：**阶段六已完成（v0.1.7）；v0.1.8 做了一轮七条体验修正**，
 阶段七（本地化 + 崩溃恢复 + 诊断导出）未开始。
 （v0.1.4 ~ v0.1.7 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
@@ -244,7 +244,7 @@ bash build-support/build.sh
 <python> build-support/_probe_stage4.py              # 阶段四：自动隐藏/全屏让位/AppBar/自愈（48 项）
 <python> build-support/_probe_display_change.py       # 显示器/DPI 变化自适应 + 野指针健壮性（26 项）
 <python> build-support/_probe_drop.py                 # 拖文件到图标（14 项）
-<python> build-support/_probe_preview.py              # 悬停预览 / DWM 缩略图（13 项）
+<python> build-support/_shot_default.py                # 默认配置截图 + 回收站图标提取
 <python> build-support/_probe_layout.py               # 位置配置：4 停靠边 / 对齐 / 偏移（18 项）
 <python> build-support/_probe_settings.py             # 设置窗口 / 自启 / 显示器锚定（17 项）
 bash build-support/_shot_settings.py                 # 阶段六截图 → build/_review/
@@ -643,6 +643,58 @@ LRESULT CALLBACK DockWin::subclassProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 设置窗口里那一项的 getter 读**注册表真值**（`autostart::isEnabled()`）而不是配置字段 ——
 用户可能在任务管理器里关过自启，那才是事实；setter 两个都写，保证配置那份不漂。
 
+### 图标行为什么拆成三段容器
+
+左固定项 | 临时项（正在运行的应用）| 右固定项 —— 对应默认配置的
+"资源管理器 | 运行中的应用 | 回收站"。
+
+⚠ 为什么不能靠子节点顺序排：Ling 的 `Node::setChild()` **只能 append**
+（`YGNodeInsertChild(..., YGNodeGetChildCount)`），而 `children` 是 protected 的，
+外面没法把"后面才出现的临时图标"插到"右侧固定项"前面去。
+三个容器各自按沿边方向定位（`applyNodeLayout()`），就能表达这种布局。
+
+配套两点：段内"最后一个不加间距"要按**本段**判断（`isLastInSegment`，
+不能看"是不是 items 最后一项"）；段间距由 `applyNodeLayout()` 在三段之间补。
+
+### 回收站这类 shell 虚拟对象要走 PIDL
+
+配置里写的是 **CLSID**：`"::{645FF040-5081-101B-9F08-00AA002F954E}"`。
+
+⚠ 实测 `SHGetFileInfoW(L"::{...}", ...)` 三种 flags（SYSICONINDEX / ICON|LARGEICON /
+ICON|SMALLICON）**全返回 0** —— 它不认裸 CLSID 字符串。必须：
+
+```
+SHParseDisplayName(path) → PIDL
+SHGetFileInfoW((LPCWSTR)pidl, ..., SHGFI_PIDL | SHGFI_SYSICONINDEX)  → iIcon
+SHGetImageList(SHIL_JUMBO) → GetIcon(iIcon)                          → 256px 图标
+```
+
+打开同理：`ShellExecuteExW` + `SEE_MASK_IDLIST | SEE_MASK_INVOKEIDLIST` +
+`sei.lpIDList = pidl`，**不能**拿字符串直接 `ShellExecuteW`。
+菜单里也不给虚拟对象"以管理员身份打开"。
+
+### 「全屏时让位」为什么需要 LOCATIONCHANGE
+
+全屏判定 = 前台窗口矩形 ⊇ 所在监视器矩形。原来只在 `HSHELL_WINDOWACTIVATED` 上触发，
+但**把当前窗口全屏化**（F11 / 双击标题栏 / 播放器全屏按钮）**不换前台窗口** →
+shell 不发那条事件 → 状态一直不更新 → 看起来"这个开关没效果"。
+
+加 `EVENT_OBJECT_LOCATIONCHANGE`（前台窗口一变形就重判）。
+
+⚠ 但它是**高频事件**：加完空闲 CPU 从 **0.000% 涨到 1.094%**，正好顶穿阶段一
+那条 1% 红线。回调里**节流 100ms** 后回到 **0.156%**。
+教训：加事件订阅前先想清楚它的触发频率。
+
+### ⚠ 探针陷阱：拍"空闲参考图"之前先移开光标
+
+阶段一那条"悬停后画面确有变化"是拿 idle 图和 hover 图比像素。
+如果**上一轮测试（或别的调试脚本）把光标留在了 dock 上**，那么这张"空闲图"
+其实已经带着放大 —— 一比就是 0 差异像素，**误报成"放大动画没在画"**。
+实测踩过一次，绕了一圈才发现是探针自己的锅。
+
+顺带：状态类探针要能**自证**。那次我先用 verbose 日志确认了 `apply index=2`
+真的发生了、再看截图确认图标确实放大了，才敢断定是探针而不是程序的问题。
+
 ## 已知限制 / 下一步
 
 - **滚轮调大小没做**（任务书 §2 #24）—— 用户明确说不需要这一项。
@@ -650,7 +702,8 @@ LRESULT CALLBACK DockWin::subclassProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
   "`monitorIndex=0` 与 `-1` 等价"和"越界退回主屏"。真正插两块屏、改混合 DPI 的效果
   还需要实机确认（`MonitorUtil` 用的是 `rcMonitor`，理论上混合 DPI 下位置不会偏，
   但**没实测过**）。设置窗口里显示器选项在多屏时才列出来。
-- **多窗口预览还是"取第一个窗口"**，没做成任务书 §2 #17 / #16 说的**列表**
+- **悬停预览已按用户要求移除**（v0.1.8 删掉 `PreviewWin.*`），所以任务书 §2 #16/#17
+  的"窗口缩略图列表"也不会再做了
   （每窗口一张缩略图 + 标题）。单窗口预览、画面来源、位置都通了，列表是排列与
   多缩略图管理的事，下一步补。
 - 悬停**名称气泡**（纯文字标签）未做 —— 预览气泡已经覆盖了"看这是哪个应用"的需求，

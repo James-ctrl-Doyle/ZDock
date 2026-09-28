@@ -108,28 +108,25 @@ namespace zdock {
 
 	std::vector<ItemConfig> Config::defaultItems()
 	{
-		wchar_t winDir[MAX_PATH]{};
-		if (!GetWindowsDirectoryW(winDir, MAX_PATH)) return {};
-		const std::wstring root{ winDir };
-
-		// 顺序即显示顺序。取存在的前 6 个。
-		const std::wstring candidates[] = {
-			root + L"\\explorer.exe",
-			root + L"\\System32\\notepad.exe",
-			root + L"\\System32\\mspaint.exe",
-			root + L"\\System32\\cmd.exe",
-			root + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-			root + L"\\System32\\SnippingTool.exe",
-			root + L"\\System32\\calc.exe",
-			root + L"\\System32\\regedit.exe",
-		};
-
 		std::vector<ItemConfig> out;
-		for (const auto& path : candidates) {
-			if (out.size() >= 6) break;
-			if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-			out.push_back(ItemConfig{ path, {} });
+
+		// 默认只有两项：**左边资源管理器、右边回收站**，
+		// 中间那段留给"正在运行的应用"（临时图标会插在左右两组固定项之间）。
+		// （以前默认塞了 6 个系统程序，用户反馈"图标太多了"。）
+
+		wchar_t winDir[MAX_PATH]{};
+		if (GetWindowsDirectoryW(winDir, MAX_PATH)) {
+			const std::wstring explorer = std::wstring{ winDir } + L"\\explorer.exe";
+			if (GetFileAttributesW(explorer.c_str()) != INVALID_FILE_ATTRIBUTES) {
+				out.push_back(ItemConfig{ explorer, {}, false });
+			}
 		}
+
+		// 回收站：没有 exe 路径，用它的 **CLSID**（shell 虚拟对象）。
+		// 图标提取 / 打开都要按 PIDL 走 —— 实测 SHGetFileInfo 对裸 CLSID 字符串
+		// 三种 flags 全返回 0，必须先 SHParseDisplayName 解析出 PIDL。
+		out.push_back(ItemConfig{ L"::{645FF040-5081-101B-9F08-00AA002F954E}", L"回收站", true });
+
 		return out;
 	}
 
@@ -238,6 +235,9 @@ namespace zdock {
 					ItemConfig ic;
 					ic.path = std::wstring{ item.GetNamedString(L"path", L"") };
 					ic.name = std::wstring{ item.GetNamedString(L"name", L"") };
+					// GetNamedBoolean 在值不是布尔时会抛 → 单独兜底，别让它拖垮整个 items 段
+					try { ic.pinRight = item.GetNamedBoolean(L"pinRight", false); }
+					catch (const winrt::hresult_error&) { ic.pinRight = false; }
 					if (ic.path.empty()) continue;   // 没路径的条目直接跳过，不给后面添麻烦
 					items.push_back(std::move(ic));
 				}
@@ -338,6 +338,8 @@ namespace zdock {
 			JsonObject o;
 			o.SetNamedValue(L"path", JsonValue::CreateStringValue(it.path));
 			if (!it.name.empty()) o.SetNamedValue(L"name", JsonValue::CreateStringValue(it.name));
+			// 只在 true 时写出，保持 config.json 干净（默认项不占行）
+			if (it.pinRight) o.SetNamedValue(L"pinRight", JsonValue::CreateBooleanValue(true));
 			arr.Append(o);
 		}
 		root.SetNamedValue(L"items", arr);

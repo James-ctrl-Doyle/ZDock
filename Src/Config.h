@@ -10,8 +10,20 @@ namespace zdock {
 	/// <summary>一个 Dock 项的配置（图标列表里的一项）。</summary>
 	struct ItemConfig
 	{
-		std::wstring path;   // 可执行文件 / 文件 / 文件夹的路径
+		/// <summary>
+		/// 可执行文件 / 文件 / 文件夹的路径；
+		/// 也支持 **shell 虚拟对象**（`"::{CLSID}"` 或 `"shell:xxx"`），比如回收站
+		/// —— 那种没有 exe 路径。⚠ 图标提取与打开都要按 PIDL 走，不能当普通路径处理
+		/// （实测 `SHGetFileInfo` 对裸 CLSID 字符串直接返回 0）。
+		/// </summary>
+		std::wstring path;
 		std::wstring name;   // 显示名。空 = 从文件名推
+		/// <summary>
+		/// 靠右固定：**正在运行的应用**（临时图标）会插在"左侧固定项"和"右侧固定项"之间。
+		/// 默认 false（靠左）。这样"资源管理器在最左、回收站在最右、中间是运行中的软件"
+		/// 就是一份默认配置能表达出来的东西。
+		/// </summary>
+		bool pinRight{ false };
 	};
 
 	/// <summary>

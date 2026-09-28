@@ -5,7 +5,6 @@
 #include "WindowTracker.h"
 #include "EdgeHotZone.h"
 #include "AppBarReserve.h"
-#include "PreviewWin.h"
 #include "SettingsWin.h"
 #include <vector>
 #include <string>
@@ -22,6 +21,12 @@ namespace zdock {
 		IndicatorNode* indicator{ nullptr };
 		/// <summary>临时图标：不是用户固定的，而是"有窗口在跑但这个应用没被固定"时自动加的。</summary>
 		bool temporary{ false };
+		/// <summary>
+		/// 靠右固定（来自 ItemConfig::pinRight）。
+		/// 临时图标一律插在"左侧固定项"和"右侧固定项"之间 ——
+		/// 所以默认配置能摆成"资源管理器 | 运行中的应用 | 回收站"。
+		/// </summary>
+		bool pinRight{ false };
 		/// <summary>
 		/// 该图标对应哪个应用分组（WindowTracker 的 AppGroup::key）。
 		/// 固定项按 exe 路径找分组；临时项直接记住自己的键。
@@ -67,9 +72,6 @@ namespace zdock {
 		static constexpr int   kTimerAutoHide = 2;  // 自动隐藏延迟 / 滑动补间（阶段四）
 		static constexpr int   kTimerSlide = 3;     // 滑动动画补间（阶段四）
 		static constexpr int   kTimerRelayout = 4;  // 显示环境变化后的重排（延迟一拍，见下）
-		static constexpr int   kTimerPreview = 5;   // 悬停预览的 300ms 延迟（阶段五）
-		/// 悬停多久之后弹预览（任务书 §2 #17：约 300ms）
-		static constexpr int   kPreviewDelayMs = 300;
 		static constexpr int   kMenuExit = 101;
 		static constexpr int   kMenuOpen = 102;
 		static constexpr int   kMenuOpenAdmin = 103;
@@ -309,6 +311,16 @@ namespace zdock {
 		/// <summary>路径是不是目录（决定"用程序打开"还是"复制进去"）。</summary>
 		static bool isDirectoryPath(const std::wstring& path);
 
+		/// <summary>
+		/// 路径是不是 shell 虚拟对象（`"::{CLSID}"` / `"shell:xxx"`）。
+		/// 这类对象没有 exe 路径 —— 图标提取要按 PIDL 走、打开要用 SEE_MASK_IDLIST，
+		/// "以管理员身份打开"对它们也没有意义。
+		/// </summary>
+		static bool isShellObjectPath(const std::wstring& path)
+		{
+			return path.size() >= 3 && path[0] == L':' && path[1] == L':';
+		}
+
 		// ---- 阶段六：位置配置（停靠边 / 对齐 / 偏移）----
 
 		/// <summary>停靠边（任务书 §2 #22）。</summary>
@@ -337,17 +349,6 @@ namespace zdock {
 		/// <summary>沿滑出方向把窗口完全移出屏幕所需的位移（物理像素）。</summary>
 		int slideDistance() const;
 
-		// ---- 悬停预览（阶段五）----
-
-		/// <summary>
-		/// 悬停满 kPreviewDelayMs 后弹预览：取该图标对应应用的窗口，
-		/// 用 DWM 缩略图显示实时画面（任务书 §2 #17）。
-		/// </summary>
-		void showPreviewForHover();
-
-		/// <summary>取消待弹出的预览 + 收起已显示的预览（鼠标离开图标时调）。</summary>
-		void cancelPreview();
-
 		float px(float logical) const { return logical * dpi; }
 		/// <summary>面板沿停靠边方向的长度（逻辑像素）。</summary>
 		float panelAlong() const;
@@ -364,6 +365,18 @@ namespace zdock {
 		float rowH() const { return horizontalEdge() ? cfgIconBase : iconsAlong(); }
 
 		/// <summary>
+		/// `items[i]` 是不是它**所在那一段**（左固定 / 临时 / 右固定）的最后一个。
+		/// 段内最后一个不加间距 —— 段间距由 `applyNodeLayout()` 在三段之间补。
+		///
+		/// ⚠ 判断要只看"段"、不看顺序：临时项是后来 append 到 items 末尾的，
+		///   所以 items 的顺序并不总是 [左][临时][右]。
+		/// </summary>
+		bool isLastInSegment(size_t i) const;
+
+		/// <summary>三段里各有几项（左固定 / 临时 / 右固定）。</summary>
+		void segmentCounts(size_t& left, size_t& temp, size_t& right) const;
+
+		/// <summary>
 		/// 按当前停靠边把面板与图标行摆好：位置（halo 在哪侧）、尺寸、
 		/// 图标行的排列方向（横向边 Row / 纵向边 Column）。
 		///
@@ -376,6 +389,17 @@ namespace zdock {
 		std::vector<DockItem> items;
 		Ling::Node* panel{ nullptr };
 		Ling::Node* row{ nullptr };
+		/// <summary>
+		/// 图标行拆成**三段容器**：左固定项 | 临时项（正在运行的应用）| 右固定项。
+		///
+		/// ⚠ 为什么要拆而不是靠子节点顺序：Ling 的 `Node::setChild()` 只能
+		/// **append**（`YGNodeInsertChild(..., count)`），而 `children` 是 protected 的，
+		/// 外面没法把"后面才出现的临时图标"插到"右侧固定项"前面。
+		/// 拆成三个容器、各自按沿边方向定位，就能表达
+		/// "资源管理器 | 运行中的应用 | 回收站"这种布局。
+		/// </summary>
+		Ling::Node* rowTemp{ nullptr };
+		Ling::Node* rowRight{ nullptr };
 		int hoverIndex{ -1 };
 		bool hoverTimerOn{ false };
 
@@ -419,11 +443,6 @@ namespace zdock {
 
 		EdgeHotZone hotZone;
 		AppBarReserve appBar;
-
-		/// 悬停预览气泡（独立顶层窗口，DWM 缩略图做画面 —— 见 PreviewWin.h）
-		PreviewWin preview;
-		/// 300ms 预览延迟的定时器是否挂着
-		bool previewTimerOn{ false };
 
 		/// 设置窗口（阶段六，自绘 —— 见 SettingsWin.h）
 		SettingsWin settings;

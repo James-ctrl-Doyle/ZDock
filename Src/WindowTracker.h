@@ -178,6 +178,30 @@ namespace zdock {
 		HWINEVENTHOOK hookMinimizeStart{ nullptr };
 		HWINEVENTHOOK hookMinimizeEnd{ nullptr };
 		HWINEVENTHOOK hookNameChange{ nullptr };
+		/// <summary>
+		/// 窗口位置 / 大小变化。
+		///
+		/// ⚠ 这个钩子是**为了让"全屏让位"能感知"把当前窗口全屏化"**：
+		///   按 F11 / 双击标题栏 / 播放器点全屏，**前台窗口并没有换**，
+		///   shell 不会发 `WINDOWACTIVATED`，于是全屏状态一直不更新、dock 不让位
+		///   （用户反馈："全屏时让位打开后没发现实际效果"）。
+		///   加上它之后，前台窗口一变形就重判一次全屏。
+		///
+		/// ⚠ 这是**事件不是轮询**（红线 4 允许 SetWinEventHook）。
+		///   但它很频繁（拖窗口时每帧都发），所以回调里只对
+		///   **前台窗口**做一次 GetWindowRect 级重判，不干别的。
+		/// </summary>
+		HWINEVENTHOOK hookLocation{ nullptr };
+		/// <summary>
+		/// `LOCATIONCHANGE` 的节流时间戳。
+		///
+		/// ⚠ 这个事件在拖动窗口 / 播放视频时每秒能来几十上百次，而前台窗口
+		///   **一直**在动（动画、重绘）时空闲也会被触发 —— 每次都做
+		///   `GetWindowRect` + `MonitorFromWindow` 会把空闲 CPU 抬起来
+		///   （实测 0.000% → 1.09%，正好卡在阶段一那条 1% 红线上）。
+		///   但"全屏了没有"是个人类尺度的事，100ms 的精度绰绰有余。
+		/// </summary>
+		ULONGLONG lastLocationCheck{ 0 };
 
 		std::vector<AppGroup> groupList;
 		/// hwnd -> 分组在 groupList 里的下标（事件处理要 O(1)）

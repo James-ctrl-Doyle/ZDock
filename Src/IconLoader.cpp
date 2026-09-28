@@ -64,10 +64,51 @@ namespace zdock {
 
 		constexpr int kShilJumbo = 4;   // SHIL_JUMBO：256px 档
 
+		// ------------------------------------------------------------------
+		// shell 虚拟对象（回收站、此电脑、控制面板……）走 PIDL。
+		//
+		// ⚠ 这类对象没有 exe 路径，配置里写的是 `"::{CLSID}"`。
+		//   实测 `SHGetFileInfoW(L"::{645FF040-...}", ...)` 三种 flags 全返回 0 ——
+		//   它**不认裸 CLSID 字符串**，必须先 `SHParseDisplayName` 解析出 PIDL，
+		//   再带 `SHGFI_PIDL` 调。
+		// ------------------------------------------------------------------
+
+		/// 是不是 shell 虚拟对象路径（`"::{CLSID}"` 这种）。
+		bool isShellObject(const std::wstring& path)
+		{
+			return path.size() >= 3 && path[0] == L':' && path[1] == L':';
+		}
+
+		/// 解析成 PIDL。**调用方负责 CoTaskMemFree**。失败返回 nullptr。
+		PIDLIST_ABSOLUTE parseShellPidl(const std::wstring& path)
+		{
+			PIDLIST_ABSOLUTE pidl{};
+			const HRESULT hr = SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr);
+			if (FAILED(hr) || !pidl) {
+				log(std::format(L"[icon] SHParseDisplayName({}) hr=0x{:08X}", path, (unsigned)hr));
+				return nullptr;
+			}
+			return pidl;
+		}
+
 		HICON getJumboIcon(const std::wstring& path)
 		{
 			SHFILEINFOW sfi{};
-			if (!SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX)) {
+			DWORD flags = SHGFI_SYSICONINDEX;
+			LPCWSTR target = path.c_str();
+
+			PIDLIST_ABSOLUTE pidl = nullptr;
+			if (isShellObject(path)) {
+				pidl = parseShellPidl(path);
+				if (!pidl) return nullptr;
+				target = reinterpret_cast<LPCWSTR>(pidl);
+				flags |= SHGFI_PIDL;
+			}
+
+			const DWORD_PTR got = SHGetFileInfoW(target, 0, &sfi, sizeof(sfi), flags);
+			if (pidl) CoTaskMemFree(pidl);   // ⚠ 之后的 sfi.iIcon 已经不依赖它了
+
+			if (!got) {
 				log(L"[icon] SHGetFileInfo(SYSICONINDEX) 失败");
 				return nullptr;
 			}
@@ -101,7 +142,20 @@ namespace zdock {
 		HICON getFallbackIcon(const std::wstring& path)
 		{
 			SHFILEINFOW sfi{};
-			if (!SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON)) return nullptr;
+			DWORD flags = SHGFI_ICON | SHGFI_LARGEICON;
+			LPCWSTR target = path.c_str();
+
+			PIDLIST_ABSOLUTE pidl = nullptr;
+			if (isShellObject(path)) {
+				pidl = parseShellPidl(path);
+				if (!pidl) return nullptr;
+				target = reinterpret_cast<LPCWSTR>(pidl);
+				flags |= SHGFI_PIDL;
+			}
+
+			const DWORD_PTR got = SHGetFileInfoW(target, 0, &sfi, sizeof(sfi), flags);
+			if (pidl) CoTaskMemFree(pidl);
+			if (!got) return nullptr;
 			return sfi.hIcon;
 		}
 
