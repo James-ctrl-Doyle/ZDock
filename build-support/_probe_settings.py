@@ -289,9 +289,9 @@ def main():
                     sr = rect_of(sw)
                     dpi = u32.GetDpiForWindow(sw) / 96.0
                     # 与 SettingsWin.h 的 kWinW / kWinH 对齐
-                    # ⚠ 改窗口尺寸时这里的期望值要一起改（第一版 700 忘了跟着改成 790）
-                    exp_w = int(round(460 * dpi))
-                    exp_h = int(round(790 * dpi))
+                    # ⚠ 改窗口尺寸时这里的期望值要一起改（已经改过两次：700→790→720x560）
+                    exp_w = int(round(720 * dpi))
+                    exp_h = int(round(560 * dpi))
                     got_w, got_h = sr[2] - sr[0], sr[3] - sr[1]
                     check('设置窗口尺寸符合预期',
                           abs(got_w - exp_w) <= 4 and abs(got_h - exp_h) <= 4,
