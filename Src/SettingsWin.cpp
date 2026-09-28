@@ -27,16 +27,18 @@ namespace zdock {
 		// 一套跟 dock 面板同调性的配色（面板是 #1A1A1A @80%，强调色 #4CC2FF）
 		constexpr uint32_t kBg = 0x1C1C1CFF;          // 窗口底
 		constexpr uint32_t kNavBg = 0x171717FF;       // 左侧导航底
-		constexpr uint32_t kNavOn = 0x24435AFF;       // 导航选中（深青）
+		constexpr uint32_t kNavOn = 0x2A3F7AFF;       // 导航选中（深蓝）
 		constexpr uint32_t kNavHover = 0x2A2A2AFF;
-		constexpr uint32_t kText = 0xE8E8E8FF;
+		constexpr uint32_t kText = 0xDCDCDCFF;        // 标签：中亮的灰（参考图也是中性灰，不抢眼）
 		constexpr uint32_t kTextDim = 0x9A9A9AFF;
-		constexpr uint32_t kAccent = 0x4CC2FFFF;
+		// ⚠ 强调色取的是参考图里那个亮蓝（#597EF7）—— 它是**设置窗口专用**的，
+		//   跟 dock 面板指示器的青色 #4CC2FF 不是同一个。用户明确要"蓝色强调"。
+		constexpr uint32_t kAccent = 0x597EF7FF;
 		constexpr uint32_t kBtnBg = 0x2E2E2EFF;
 		constexpr uint32_t kBtnHover = 0x3C3C3CFF;
-		constexpr uint32_t kBtnOn = 0x1F5C7AFF;       // 选中态（偏青的深色）
+		constexpr uint32_t kBtnOn = 0x597EF7FF;       // 选中 / 开启态（亮蓝，同参考图）
 		constexpr uint32_t kTrack = 0x3A3A3AFF;
-		constexpr uint32_t kLine = 0x2E2E2EFF;        // 行分隔线
+		constexpr uint32_t kLine = 0x303030FF;        // 行分隔线
 		constexpr uint32_t kField = 0x2A2A2AFF;       // 输入框底
 	} // namespace
 
@@ -55,14 +57,6 @@ namespace zdock {
 		bg->setBg(Color(kBg));
 		bg->setBorderRadius(10.f);
 		bg->setBorder(1.f, Color(0xFFFFFF1A));
-
-		// 左侧导航的底色（一条竖带）
-		auto* navBg = body->makeChild<Ling::Node>();
-		navBg->setPositionType(Ling::Position::Absolute);
-		navBg->setPosition(Ling::Edge::Left, 0.f);
-		navBg->setPosition(Ling::Edge::Top, 0.f);
-		navBg->setSize(kNavW, kWinH);
-		navBg->setBg(Color(kNavBg));
 
 		auto* title = body->makeChild<Label>();
 		title->setPositionType(Ling::Position::Absolute);
@@ -91,9 +85,9 @@ namespace zdock {
 		// 左侧导航只负责"滚过去"—— 不重建控件。
 		scroller = body->makeChild<ScrollerBox>();
 		scroller->setPositionType(Ling::Position::Absolute);
-		scroller->setPosition(Ling::Edge::Left, kNavW);
+		scroller->setPosition(Ling::Edge::Left, 0.f);
 		scroller->setPosition(Ling::Edge::Top, kTitleH);
-		scroller->setSize(kWinW - kNavW, kWinH - kTitleH);
+		scroller->setSize(kWinW, kWinH - kTitleH);
 		content = scroller->makeChild<Ling::Node>();   // ScrollerBox::setChild 会接管
 	}
 
@@ -122,7 +116,7 @@ namespace zdock {
 		line->setPositionType(Ling::Position::Absolute);
 		line->setPosition(Ling::Edge::Left, kPadX);
 		line->setPosition(Ling::Edge::Top, y);
-		line->setSize(kWinW - kNavW - 2 * kPadX, 1.f);
+		line->setSize(kWinW - 2 * kPadX, 1.f);
 		line->setBg(Color(kLine));
 	}
 
@@ -131,7 +125,7 @@ namespace zdock {
 		auto* lab = content->makeChild<Label>();
 		lab->setPositionType(Ling::Position::Absolute);
 		lab->setPosition(Ling::Edge::Left, kPadX);
-		lab->setPosition(Ling::Edge::Top, y + 14.f);
+		lab->setPosition(Ling::Edge::Top, y + 10.f);   // 行高 39、字高约 18 -> 垂直居中
 		lab->setText(text);
 		lab->setFontSize(13.f);
 		lab->setColor(Color(kText));
@@ -142,16 +136,10 @@ namespace zdock {
 		auto* lab = content->makeChild<Label>();
 		lab->setPositionType(Ling::Position::Absolute);
 		lab->setPosition(Ling::Edge::Left, kPadX);
-		lab->setPosition(Ling::Edge::Top, y + 20.f);
+		lab->setPosition(Ling::Edge::Top, y + 18.f);
 		lab->setText(title);
 		lab->setFontSize(15.f);
 		lab->setColor(Color(kAccent));
-		// 记一下这一段在内容坐标系里的位置，导航点击时滚到这儿。
-		// ⚠ 要按**调用顺序**对应导航项 —— 不能拿 navs.back()（它永远是最后建的那个）。
-		if (nextNavIdx < navs.size()) {
-			navs[nextNavIdx].contentY = y;
-			++nextNavIdx;
-		}
 		return y + kSectionH;
 	}
 
@@ -172,7 +160,7 @@ namespace zdock {
 		auto* sl = content->makeChild<Slider>();
 		sl->setPositionType(Ling::Position::Absolute);
 		sl->setPosition(Ling::Edge::Left, x0);
-		sl->setPosition(Ling::Edge::Top, y + 16.f);
+		sl->setPosition(Ling::Edge::Top, y + 9.f);
 		sl->setSize(kSliderW, 20.f);
 		sl->setRange(min, max);
 		sl->setStep(step);
@@ -189,13 +177,14 @@ namespace zdock {
 		auto* box = content->makeChild<TextBox>();
 		box->setPositionType(Ling::Position::Absolute);
 		box->setPosition(Ling::Edge::Left, x0 + kSliderW + 14.f);
-		box->setPosition(Ling::Edge::Top, y + 8.f);
+		box->setPosition(Ling::Edge::Top, y + 4.f);
 		box->setSize(kNumW, 32.f);
 		box->setFontSize(13.f);
 		box->setVerticalCenter(true);
 		box->setPaddingLeft(8.f);
 		box->setPaddingRight(6.f);
 		box->setBg(Color(kField));
+		box->setBorder(1.f, Color(0x3E3E3EFF));   // 深色底下不加描边会糊在一起
 		box->setBorderRadius(6.f);
 		box->setColor(Color(kText));
 		box->setCaretColor(Color(kAccent));
@@ -255,31 +244,35 @@ namespace zdock {
 	{
 		rowLabel(y, label);
 
+		// 开关做成"**无背景的文字按钮**"，用文字颜色表示状态 ——
+		// 这是从 ZPin 的设置页搬过来的做法（同一个作者、同一套 Ling）：
+		// 开 = 亮蓝字，关 = 灰字，悬停才有底色。比"蓝底白字的方块"轻，
+		// 整行看上去就是"标签 ...... 状态"，不会被一排色块切碎。
 		auto* b = content->makeChild<Button>();
 		b->setPositionType(Ling::Position::Absolute);
 		b->setPosition(Ling::Edge::Left, kPadX + kLabelW);
-		b->setPosition(Ling::Edge::Top, y + 9.f);
-		b->setSize(72.f, 28.f);
+		b->setPosition(Ling::Edge::Top, y + 1.f);
+		b->setSize(kWinW - 2 * kPadX - kLabelW, kRowH - 2.f);
 		b->setFontSize(13.f);
-		b->setBorderRadius(6.f);
+		b->setBorderRadius(4.f);
+		b->setBg(Color(0x00000000));        // 平时没有底色
 		b->setHoverBg(Color(kBtnHover));
-		b->setHoverColor(Color(0xFFFFFFFF));
-		b->setText(getter() ? L"开" : L"关");
-		b->setBg(Color(getter() ? kBtnOn : kBtnBg));
-		b->setColor(Color(kText));
+		b->setHoverColor(Color(kAccent));   // 悬停时字更亮一点
 
-		b->onClick.add([this, b, getter, setter](Button*) {
+		auto paint = [b](bool on) {
+			b->setText(on ? L"已开启" : L"未开启");
+			b->setColor(Color(on ? kAccent : kTextDim));
+			b->setHoverColor(Color(on ? kAccent : kText));
+			};
+		paint(getter());
+
+		b->onClick.add([this, b, getter, setter, paint](Button*) {
 			const bool next = !getter();
 			setter(next);
-			b->setText(next ? L"开" : L"关");
-			b->setBg(Color(next ? kBtnOn : kBtnBg));
+			paint(next);
 			if (onLiveChanged) onLiveChanged();
 			});
-		refreshers.push_back([b, getter] {
-			const bool v = getter();
-			b->setText(v ? L"开" : L"关");
-			b->setBg(Color(v ? kBtnOn : kBtnBg));
-			});
+		refreshers.push_back([b, getter, paint] { paint(getter()); });
 
 		divider(y + kRowH);
 		return y + kRowH;
@@ -305,7 +298,7 @@ namespace zdock {
 			auto* b = content->makeChild<Button>();
 			b->setPositionType(Ling::Position::Absolute);
 			b->setPosition(Ling::Edge::Left, x);
-			b->setPosition(Ling::Edge::Top, y + 9.f);
+			b->setPosition(Ling::Edge::Top, y + 5.f);
 			b->setSize(kBtnW, 28.f);
 			b->setFontSize(13.f);
 			b->setBorderRadius(6.f);
@@ -339,7 +332,7 @@ namespace zdock {
 		auto* lab = content->makeChild<Label>();
 		lab->setPositionType(Ling::Position::Absolute);
 		lab->setPosition(Ling::Edge::Left, kPadX);
-		lab->setPosition(Ling::Edge::Top, y + 13.f);
+		lab->setPosition(Ling::Edge::Top, y + 11.f);
 		lab->setText(text);
 		lab->setFontSize(12.f);
 		lab->setColor(Color(kTextDim));
@@ -352,35 +345,6 @@ namespace zdock {
 	void SettingsWin::buildUi()
 	{
 		auto* cfg = Config::get();
-
-		// 导航项先建（它们要记住各自对应的内容 y，建完内容后回填）
-		const wchar_t* navNames[] = { L"外观", L"位置", L"行为", L"启动" };
-		float navY = kNavTop;
-		for (auto* name : navNames) {
-			auto* b = body->makeChild<Button>();
-			b->setPositionType(Ling::Position::Absolute);
-			b->setPosition(Ling::Edge::Left, 8.f);
-			b->setPosition(Ling::Edge::Top, navY);
-			b->setSize(kNavW - 16.f, kNavItemH);
-			b->setFontSize(14.f);
-			b->setBorderRadius(8.f);
-			b->setText(name);
-			b->setBg(Color(kNavBg));
-			b->setColor(Color(kText));
-			b->setHoverBg(Color(kNavHover));
-			b->setHoverColor(Color(0xFFFFFFFF));
-			const size_t myIdx = navs.size();
-			navs.push_back({ b, 0.f });
-			b->onClick.add([this, myIdx](Button*) {
-				if (myIdx < navs.size() && scroller) {
-					// 滚到这一段（留 8px 的上边距，别贴着顶）
-					scroller->scrollTo(std::max(0.f, navs[myIdx].contentY - 8.f));
-				}
-				setNavActive(myIdx);
-				if (onLiveChanged) onLiveChanged();
-				});
-			navY += kNavItemH + 4.f;
-		}
 
 		float y = 8.f;
 
@@ -503,7 +467,7 @@ namespace zdock {
 		y += 46.f;
 
 		// content 的高度要显式给足 —— ScrollerBox 靠它算 maxScroll
-		content->setSize(kWinW - kNavW, y + 16.f);
+		content->setSize(kWinW, y + 16.f);
 	}
 
 	void SettingsWin::buildUiOnce()
@@ -522,22 +486,11 @@ namespace zdock {
 			});
 
 		syncFromConfig();
-		setNavActive(0);   // 默认停在"外观"
 	}
 
 	void SettingsWin::syncFromConfig()
 	{
 		for (auto& f : refreshers) f();
-	}
-
-	void SettingsWin::setNavActive(size_t idx)
-	{
-		for (size_t i = 0; i < navs.size(); ++i) {
-			if (!navs[i].btn) continue;
-			const bool on = (i == idx);
-			navs[i].btn->setBg(Color(on ? kNavOn : kNavBg));
-			navs[i].btn->setColor(Color(on ? kAccent : kText));
-		}
 	}
 
 	void SettingsWin::saveConfig()
@@ -561,7 +514,6 @@ namespace zdock {
 
 		syncFromConfig();
 		if (scroller) scroller->scrollTo(0.f);
-		setNavActive(0);
 		show();
 		if (hwnd) SetForegroundWindow(hwnd);   // 用户主动打开的，给焦点是对的
 		refresh();
