@@ -332,11 +332,13 @@ namespace zdock {
 		auto* lab = content->makeChild<Label>();
 		lab->setPositionType(Ling::Position::Absolute);
 		lab->setPosition(Ling::Edge::Left, kPadX);
-		lab->setPosition(Ling::Edge::Top, y + 11.f);
+		// ⚠ 说明行比设置行矮一截（26 而不是 kRowH）：它是**紧跟在某项下面的注解**，
+		//   跟普通行一样松的话，视觉上会像是另一个设置项。
+		lab->setPosition(Ling::Edge::Top, y + 5.f);
 		lab->setText(text);
 		lab->setFontSize(12.f);
 		lab->setColor(Color(kTextDim));
-		return y + kRowH;
+		return y + kNoteH;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -418,9 +420,6 @@ namespace zdock {
 		y = toggleRow(y, L"全屏时让位",
 			[cfg] { return cfg->hideOnFullscreen; },
 			[cfg](bool v) { cfg->hideOnFullscreen = v; });
-		y = toggleRow(y, L"预留工作区",
-			[cfg] { return cfg->reserveWorkArea; },
-			[cfg](bool v) { cfg->reserveWorkArea = v; });
 
 		// ---- 启动 ----
 		y = section(y, L"启动");
@@ -433,6 +432,18 @@ namespace zdock {
 				autostart::set(v);
 				cfg->autoStart = v;
 			});
+
+		// ---- 高级 ----
+		// 「预留工作区」挪到这里，并**明确标出副作用** —— 它走的是 Windows 的 AppBar
+		// 机制，本质就是"从工作区里扣掉一块"。所以任务栏、桌面图标、以及
+		// **全屏开始菜单**（按工作区布局）都会跟着让位。
+		// 用户 2026-10-07 就是被这个坑到过：他开了它，全屏开始菜单跟着上移了。
+		// 放在"行为"段里跟"自动隐藏"并列，看不出这个差别。
+		y = section(y, L"高级");
+		y = toggleRow(y, L"预留工作区",
+			[cfg] { return cfg->reserveWorkArea; },
+			[cfg](bool v) { cfg->reserveWorkArea = v; });
+		y = noteRow(y, L"从工作区扣除 Dock 高度。任务栏、桌面图标和全屏开始菜单都会跟着让位。");
 
 		// ---- 底部：恢复默认外观 ----
 		divider(y + 6.f);

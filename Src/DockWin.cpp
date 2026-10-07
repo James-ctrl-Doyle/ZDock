@@ -668,7 +668,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.11 · 修图标叠加");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.12 · 高级段 + 探针不再污染工作区");
 
 		POINT pt{};
 		GetCursorPos(&pt);

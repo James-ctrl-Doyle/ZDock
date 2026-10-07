@@ -104,6 +104,7 @@ namespace zdock {
 		static constexpr float kTitleH = 46.f;     // 顶部标题条
 		static constexpr float kPadX = 22.f;       // 内容区左右内边距
 		static constexpr float kRowH = 39.f;   // 跟 ZPin 设置页一致（也正是参考图量出来的 49-50 物理）
+		static constexpr float kNoteH = 26.f;  // 注解行（紧跟某项下面的灰字，比设置行矮）
 		static constexpr float kSectionH = 52.f;
 		static constexpr float kLabelW = 176.f;    // 行标签宽（控件从它右边开始）
 		static constexpr float kSliderW = 168.f;
