@@ -71,11 +71,22 @@ namespace zdock {
 		float sliderRow(float y, const wchar_t* label, float min, float max, float step,
 			std::function<float()> getter, std::function<void(float)> setter);
 		float toggleRow(float y, const wchar_t* label,
-			std::function<bool()> getter, std::function<void(bool)> setter);
+			std::function<bool()> getter, std::function<void(bool)> setter,
+			bool dividerAfter = true);
 		float choiceRow(float y, const wchar_t* label,
 			std::initializer_list<std::pair<const wchar_t*, std::function<bool()>>> opts,
 			std::function<void(int)> picker);
-		float noteRow(float y, const wchar_t* text);
+		/// <summary>
+		/// 紧跟某项下面的**注解行**（小一号的灰字）。
+		/// ⚠ 它是"注解"不是"设置项"：前面那个设置项要传 `dividerAfter=false`，
+		///   让分隔线落到注解**后面** —— 用户明确要求注解和设置项之间**不要有分割线**。
+		/// </summary>
+		float noteRow(float y, const wchar_t* text, bool dividerAfter = true);
+		/// <summary>
+		/// 一行"标签 + 只读的值"（比如"显示器　只有一台"）。
+		/// ⚠ 标签用**正常字色** —— 它是正经的一项，不是注解（用户专门提过这条）。
+		/// </summary>
+		float infoRow(float y, const wchar_t* label, const wchar_t* value);
 
 		/// <summary>行底那条细分隔线。</summary>
 		void divider(float y);

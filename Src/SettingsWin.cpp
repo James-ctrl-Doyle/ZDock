@@ -240,7 +240,7 @@ namespace zdock {
 	}
 
 	float SettingsWin::toggleRow(float y, const wchar_t* label,
-		std::function<bool()> getter, std::function<void(bool)> setter)
+		std::function<bool()> getter, std::function<void(bool)> setter, bool dividerAfter)
 	{
 		rowLabel(y, label);
 
@@ -274,7 +274,8 @@ namespace zdock {
 			});
 		refreshers.push_back([b, getter, paint] { paint(getter()); });
 
-		divider(y + kRowH);
+		// ⚠ 后面紧跟注解行时不要在这儿画分隔线（用户要求注解和设置项之间没有线）
+		if (dividerAfter) divider(y + kRowH);
 		return y + kRowH;
 	}
 
@@ -327,18 +328,36 @@ namespace zdock {
 		return y + kRowH;
 	}
 
-	float SettingsWin::noteRow(float y, const wchar_t* text)
+	float SettingsWin::noteRow(float y, const wchar_t* text, bool dividerAfter)
 	{
 		auto* lab = content->makeChild<Label>();
 		lab->setPositionType(Ling::Position::Absolute);
 		lab->setPosition(Ling::Edge::Left, kPadX);
-		// ⚠ 说明行比设置行矮一截（26 而不是 kRowH）：它是**紧跟在某项下面的注解**，
+		// ⚠ 注解行比设置行矮一截（kNoteH 而不是 kRowH）：它是**紧跟在某项下面的注解**，
 		//   跟普通行一样松的话，视觉上会像是另一个设置项。
-		lab->setPosition(Ling::Edge::Top, y + 5.f);
+		lab->setPosition(Ling::Edge::Top, y + 3.f);
 		lab->setText(text);
 		lab->setFontSize(12.f);
 		lab->setColor(Color(kTextDim));
+		if (dividerAfter) divider(y + kNoteH);
 		return y + kNoteH;
+	}
+
+	float SettingsWin::infoRow(float y, const wchar_t* label, const wchar_t* value)
+	{
+		// 标签用**正常字色**（跟 sliderRow/toggleRow 的左列一致）——
+		// 它不是注解，是"显示器"这种正经的一项。用户专门指出过这条。
+		rowLabel(y, label);
+
+		auto* val = content->makeChild<Label>();
+		val->setPositionType(Ling::Position::Absolute);
+		val->setPosition(Ling::Edge::Left, kPadX + kLabelW);
+		val->setPosition(Ling::Edge::Top, y + 10.f);
+		val->setText(value);
+		val->setFontSize(13.f);
+		val->setColor(Color(kTextDim));      // 值本身淡一点，跟开关的"未开启"呼应
+		divider(y + kRowH);
+		return y + kRowH;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -397,7 +416,7 @@ namespace zdock {
 			const auto mons = monitors::enumerate();
 			const int n = static_cast<int>(mons.size());
 			if (n <= 1) {
-				y = noteRow(y, L"显示器    只有一台（接多屏后这里会列出可选项）");
+				y = infoRow(y, L"显示器", L"只有一台（接多屏后这里会列出可选项）");
 			}
 			else {
 				y = choiceRow(y, L"显示器",
@@ -442,7 +461,8 @@ namespace zdock {
 		y = section(y, L"高级");
 		y = toggleRow(y, L"预留工作区",
 			[cfg] { return cfg->reserveWorkArea; },
-			[cfg](bool v) { cfg->reserveWorkArea = v; });
+			[cfg](bool v) { cfg->reserveWorkArea = v; },
+			/*dividerAfter=*/false);        // 线留给下面那行注解去画
 		y = noteRow(y, L"从工作区扣除 Dock 高度。任务栏、桌面图标和全屏开始菜单都会跟着让位。");
 
 		// ---- 底部：恢复默认外观 ----
@@ -494,6 +514,25 @@ namespace zdock {
 			for (auto* b : numericBoxes) {
 				if (b && b->isFocused()) { b->blur(); break; }
 			}
+			});
+
+		// ⚠⚠ 滚轮滚动之后补一次鼠标移动广播。
+		//
+		// 为什么需要：滚动会把内容里的**所有控件整体移位**，但**鼠标并没有动** ——
+		// 而 Button 的 hover 状态只在 `onMouseMove` 里更新，于是"滚动前被鼠标指着的那一个"
+		// 会把高亮一直挂在自己身上。用户 2026-10-07 报的就是这个：鼠标明明在下面
+		// 「全屏时让位」那一行，上面「停靠边」的「上」按钮却亮着。
+		//
+		// 做法：投一条 `WM_MOUSEMOVE`，带上**当前光标的真实客户区坐标**，
+		// 让所有控件按"滚动后"的位置重判一遍 hover。
+		// ⚠ 用 `PostMessage` 而不是直接调：它进消息队列尾，**保证排在这次滚动处理之后**，
+		//   不会出现"我们先重算了 hover、ScrollerBox 才去滚动"的倒序。
+		this->onMouseWheel.add([this](POINT, float) {
+			if (!hwnd) return;
+			POINT pt{};
+			if (!GetCursorPos(&pt)) return;
+			ScreenToClient(hwnd, &pt);
+			PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(pt.x, pt.y));
 			});
 
 		syncFromConfig();
