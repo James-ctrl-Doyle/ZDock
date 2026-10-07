@@ -88,12 +88,39 @@ namespace zdock {
 		scroller->setPosition(Ling::Edge::Left, 0.f);
 		scroller->setPosition(Ling::Edge::Top, kTitleH);
 		scroller->setSize(kWinW, kWinH - kTitleH);
-		content = scroller->makeChild<Ling::Node>();   // ScrollerBox::setChild 会接管
+		// ⚠⚠ 必须直接用 ScrollerBox **自己的** content 节点，绝不能再包一层。
+		//
+		//   原先写的是 `content = scroller->makeChild<Ling::Node>()`（想加个容器），
+		//   看起来无害，实际会把两套父子关系搞成对不上的：
+		//     · `Node::makeChild` 把新节点塞进 **ScrollerBox::children**（外层自己的）
+		//     · 而 `ScrollerBox::setChild` 又把新节点的 `parent` 指向 **ScrollerBox::content**
+		//   于是 `ScrollerBox::setScroll()` 里那句 `content->shiftHitY(-delta)`
+		//   —— 它沿 `content->children` 递归，而那是**空的** —— **永远到不了这些行**。
+		//
+		//   后果（用户 2026-10-07 报的"滚动之后鼠标错位"）：
+		//   视觉侧由 `content->visual.Offset` 平移，滚得好好的；
+		//   命中侧 `isPosIn` 用的 x/y **一直停在未滚动的位置** ——
+		//   滚动之后点哪儿都错位（点"按钮显示的地方"命中的是上面几百像素外的控件）。
+		//   插桩证据：滚一格后 scrollY=74，而"停靠边/上"的 y 仍是 492（未滚动值）。
+		content = scroller->content;
+
+		// ⚠ 顺手兜一下 Ling `ScrollerBox` 的**未初始化成员**：`scrollY` / `scrollerDragging`
+		//   / `dragStartMouseY` / `dragStartScrollY` 在它的构造函数里都没赋值
+		//   （见 ScrollerBox.h 的成员声明）。若 `scrollerDragging` 恰好是垃圾"真"值，
+		//   此后**任何一次鼠标移动**都会走进"拖滚动条"分支，用垃圾的 dragStart* 重算
+		//   滚动量 —— 实测能把 scrollY 算成 NaN（诊断日志里出现过 `scrollY=-nan`）。
+		//   投一条抬起消息就能复位（`ScrollerBox::onUp` 只做"置 false + 释放捕获"）；
+		//   根治要等 Ling 侧把成员初始化补上。
+		if (hwnd) PostMessageW(hwnd, WM_LBUTTONUP, 0, 0);
 	}
 
 	void SettingsWin::createOnce()
 	{
 		if (hwnd) return;
+		{
+			wchar_t hitEnv[8]{};
+			verboseHit = GetEnvironmentVariableW(L"ZDOCK_VERBOSE_SETTINGS", hitEnv, 8) > 0;
+		}
 		setSize(kWinW, kWinH);
 		setPosition(0, 0);
 		// ⚠ 用 WS_POPUP 而不是带标题栏的样式：这个程序整体自绘，塞个系统标题栏观感会裂。
@@ -529,6 +556,9 @@ namespace zdock {
 		//   不会出现"我们先重算了 hover、ScrollerBox 才去滚动"的倒序。
 		this->onMouseWheel.add([this](POINT, float) {
 			if (!hwnd) return;
+			// 诊断：先记录"滚动后"的几何（这个回调挂在 ScrollerBox 之后，
+			// 所以 ScrollerBox::onWheel 已经把 setScroll 走完了）
+			dumpHitGeom(L"after-wheel");
 			POINT pt{};
 			if (!GetCursorPos(&pt)) return;
 			ScreenToClient(hwnd, &pt);
@@ -541,6 +571,24 @@ namespace zdock {
 	void SettingsWin::syncFromConfig()
 	{
 		for (auto& f : refreshers) f();
+	}
+
+	void SettingsWin::dumpHitGeom(const wchar_t* tag)
+	{
+		if (!verboseHit || !scroller || !content) return;
+		POINT cur{};
+		if (hwnd && GetCursorPos(&cur)) ScreenToClient(hwnd, &cur);
+		log(std::format(L"[hit] {} scrollY={:.1f} dpi={:.2f} | scroller y={:.1f} h={:.1f} "
+			L"| content y={:.1f} h={:.1f} | cursor=({},{})",
+			tag, scroller->getScrollY(), dpi, scroller->y, scroller->h,
+			content->y, content->h, cur.x, cur.y));
+		for (size_t i = 0; i < content->children.size(); ++i) {
+			const Ling::Node* c = content->children[i].get();
+			if (!c) continue;
+			// x/y 是"窗口客户区绝对坐标（物理像素）"—— isPosIn 直接拿它和鼠标消息比
+			log(std::format(L"[hit]   #{} x={:.1f} y={:.1f} w={:.1f} h={:.1f}",
+				i, c->x, c->y, c->w, c->h));
+		}
 	}
 
 	void SettingsWin::saveConfig()
@@ -564,6 +612,7 @@ namespace zdock {
 
 		syncFromConfig();
 		if (scroller) scroller->scrollTo(0.f);
+		dumpHitGeom(L"open");
 		show();
 		if (hwnd) SetForegroundWindow(hwnd);   // 用户主动打开的，给焦点是对的
 		refresh();

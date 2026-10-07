@@ -1,5 +1,89 @@
 # CHANGELOG
 
+## 0.1.14 · 修「设置窗口滚动之后鼠标错位」— 2026-10-07
+
+### 用户报的现象
+
+> "设置界面里鼠标错位 bug：我鼠标放在下面那个位置，但上面那个的『上』按钮高亮了，
+> 我的判断似乎是按钮位置没有随着滑条向下划"
+
+（0.1.13 曾按"滚动后 hover 没重算"修过一版，**没解决** —— 因为那一版猜错了方向。）
+
+### 真正的根因：命中坐标根本没跟着滚动走
+
+从用户截图量出硬数据（截图 1.24 倍，正好是 520×560 逻辑窗）：
+
+- 被高亮的「上」按钮显示在客户区逻辑 **y 157..185**
+- 用户的鼠标在 **y ≈ 405** —— 两者相差正好 ≈ **滚动量（239）**
+
+即：**视觉滚了，命中没滚**。用点击（而不是 hover）当判据写了判决探针
+`_probe_hit_after_scroll.py`（点击是纯消息驱动的，后台窗口也测得了；
+hover 在探针里根本驱动不了），结果：
+
+| 用例（滚动 4 格后点击） | 实际打到的配置项 |
+|---|---|
+| 点按钮**显示位置**(171) | `iconGap 12→24` —— 打到了**未滚动坐标**下的「图标间距」滑块 |
+| 点**用户鼠标位置**(405) | `dockEdge bottom→top` —— 打到了**未滚动坐标**下的「停靠边/上」 |
+
+**根因**（我自己在 0.1.9 写设置窗口时埋的）：
+
+```cpp
+content = scroller->makeChild<Ling::Node>();   // ❌ 想加一层容器，实际把父子关系搞成两套
+```
+
+- `Node::makeChild` 把新节点塞进 **`ScrollerBox::children`**（外层自己的）
+- `ScrollerBox::setChild` 又把新节点的 `parent` 指向 **`ScrollerBox::content`**（内部的）
+
+于是 `ScrollerBox::setScroll()` 里那句 `content->shiftHitY(-delta)` —— 它沿
+`content->children` 递归，而那个 `children` 是**空的** —— **永远到不了这些设置行**。
+视觉侧由 `content->visual.Offset` 平移，所以滚动看起来完全正常；
+命中侧 `Node::isPosIn` 用的 x/y 却**一直停在未滚动的位置**。
+
+**修法**：`content = scroller->content;`（直接用 ScrollerBox 自己的 content 节点）。
+
+**插桩证据**（新增环境变量 `ZDOCK_VERBOSE_SETTINGS=1`，见 `SettingsWin::dumpHitGeom`）：
+
+```
+滚动前 : scrollY=0.0   content.y=57.0   停靠边/上 y=492   ← 未滚动位置（正确）
+滚 1 格: scrollY=74.0  content.y=-17.0  停靠边/上 y=418   ← 修复后跟着走了
+滚 2 格: scrollY=148.0 content.y=-91.0  停靠边/上 y=344
+滚 3 格: scrollY=222.0 content.y=-165.0 停靠边/上 y=270
+```
+
+### 顺带修掉一个 Ling 侧的未初始化成员
+
+`ScrollerBox` 的 `scrollY` / `scrollerDragging` / `dragStartMouseY` / `dragStartScrollY`
+**构造函数里都没赋值**（见 `ScrollerBox.h` 的成员声明）。若 `scrollerDragging` 恰好是
+垃圾"真"值，此后**任何一次鼠标移动**都会走进"拖滚动条"分支，用垃圾的 `dragStart*`
+重算滚动量 —— 诊断日志里实测出现了 `scrollY=-nan`。
+
+ZDock 侧兜住：建完 UI 后投一条 `WM_LBUTTONUP`（`ScrollerBox::onUp` 只做"置 false +
+释放捕获"）。根治要等 Ling 侧补上成员初始化。
+
+### 测试
+
+新增 `build-support/_probe_hit_after_scroll.py`（点击判决：滚动后点"显示位置"与
+"用户鼠标位置"，读 config.json 看**哪个设置项被改**）与
+`build-support/_diag_hitgeom.py`（几何诊断，走 `ZDOCK_VERBOSE_SETTINGS=1`）。
+
+回归全绿：阶段一 **24/24**、阶段三 13/13、阶段四 **48/48**、显示环境 **26/26**、
+拖放 **14/14**、位置配置 **18/18**、设置/自启 **17/17**。
+
+版本号 0.1.13.0 → 0.1.14.0。
+
+## 0.1.13 · 注解行样式 + 显示器行字号 + 滚动后重算 hover — 2026-10-07
+
+用户报三条（设置界面）：
+
+1. 滚动之后鼠标错位（上面那个「上」按钮被点亮）→ **本版只治了症**：
+   加了"滚轮之后补投一条 `WM_MOUSEMOVE`"，让控件按滚动后的位置重判 hover。
+   **没有治本**（真正的根因是命中坐标没跟着滚，见 0.1.14）。
+2. 注解行（灰色小字）和它上面那一项之间**不该有分割线** → `toggleRow` 加
+   `dividerAfter` 参数，线由注解行自己画在后面。
+3. 「显示器」那一行要用**正常字**，不是灰色小字 → 新增 `infoRow`。
+
+顺带：注解行高 `kNoteH = 26`（设置行是 39），一眼能看出是"注解"而不是另一个设置项。
+
 ## 0.1.12 · 「预留工作区」移到高级段 + 探针不再污染工作区 — 2026-10-07
 
 ### 用户报的现象

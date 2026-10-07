@@ -2,11 +2,12 @@
 
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
-当前进度：**阶段六已完成；v0.1.8 七条体验修正、v0.1.9 设置窗口改版**，
+当前进度：**阶段六已完成；v0.1.8 七条体验修正、v0.1.9 设置窗口改版、
+v0.1.13/v0.1.14 设置界面细修（注解行样式 / 滚动后鼠标错位）**，
 阶段七（本地化 + 崩溃恢复 + 诊断导出）未开始。
-（v0.1.4 ~ v0.1.7 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
+（v0.1.4 ~ v0.1.14 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
-拖放 14 项、预览 13 项、位置配置 18 项、设置/自启/显示器 17 项探针全 PASS；
+拖放 14 项、位置配置 18 项、设置/自启/显示器 17 项、设置滚动命中 4 项探针全 PASS；
 过程中挖出的 bug 已根因级修复，见 `CHANGELOG.md`）。
 
 ## 现状
@@ -247,6 +248,8 @@ bash build-support/build.sh
 <python> build-support/_shot_default.py                # 默认配置截图 + 回收站图标提取
 <python> build-support/_probe_layout.py               # 位置配置：4 停靠边 / 对齐 / 偏移（18 项）
 <python> build-support/_probe_settings.py             # 设置窗口 / 自启 / 显示器锚定（17 项）
+<python> build-support/_probe_hit_after_scroll.py      # 设置滚动后命中在哪（点击判决，4 例）
+<python> build-support/_diag_hitgeom.py                # 几何诊断（需 ZDOCK_VERBOSE_SETTINGS=1）
 bash build-support/_shot_settings.py                 # 阶段六截图 → build/_review/
 <python> build-support/_probe_ling_appid.sh           # 编出读 Ling::App::appID 的小工具（升级验证）
 <python> build-support/_probe_ling_build.sh <名>      # 编一个"Ling 窗口"探针（如 _probe_subclass）
@@ -326,6 +329,26 @@ _review/              **交付产物**（本地，被 gitignore）—— 带版�
 ```
 
 ## 关键设计说明
+
+### Ling 的滚动容器：**只能往 `scroller->content` 里加子节点**
+
+```cpp
+content = scroller->content;        // ✅ 对
+content = scroller->makeChild<Ling::Node>();   // ❌ 会把父子关系搞成两套
+```
+
+`Node::makeChild` 把新节点塞进 **`this->children`**，而 `ScrollerBox::setChild` 又把新节点的
+`parent` 指向 **`ScrollerBox::content`**（那个内部 content 节点）。两套关系对不上时：
+
+- `ScrollerBox::setScroll()` 里的 `content->shiftHitY(-delta)`（它沿 `content->children`
+  递归）**到不了这些行** → **命中坐标不跟着滚**（`isPosIn` 用的 x/y 一直停在未滚动的位置）；
+- 视觉侧却因为 `content->visual.Offset` 照常平移，所以**滚动看起来完全正常** ——
+  于是表现为"滚完之后点哪儿都错位"，而截图上一点毛病都看不出来。
+
+⚠ 这类"**视觉对、命中错**"的 bug，看截图是查不出来的：必须把**控件的 x/y 打出来**
+（`ZDOCK_VERBOSE_SETTINGS=1` → `SettingsWin::dumpHitGeom`），或者用**点击**反查
+"到底哪个控件被触发了"（`_probe_hit_after_scroll.py`）。
+0.1.13 就是只盯着截图 + hover 猜，猜错方向白改了一版。
 
 ### 透明与鼠标穿透：**必须用窗口 region，`HTTRANSPARENT` 不通**
 

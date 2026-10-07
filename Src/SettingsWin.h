@@ -97,6 +97,18 @@ namespace zdock {
 		void syncFromConfig();
 		void saveConfig();
 
+		/// <summary>
+		/// 诊断：把"滚动量 / 每个控件的命中用绝对坐标"打到日志里。
+		/// 要设环境变量 `ZDOCK_VERBOSE_SETTINGS=1` 才有输出（同 ZDOCK_VERBOSE_HOVER 的路子）。
+		///
+		/// ⚠ 为什么需要它：**控件被点中的判据是 `Node::isPosIn(pos)`，用的就是这些 x/y**。
+		///   用户报"滚动之后鼠标错位"（视觉滚了、点到的却是别的东西）时，
+		///   只有把这张表打出来才能分清是"滚动没同步到命中坐标"还是"别的原因" ——
+		///   光看截图只能看到视觉侧，而这一条恰恰是视觉对、命中错。
+		/// </summary>
+		void dumpHitGeom(const wchar_t* tag);
+		bool verboseHit{ false };
+
 		/// 拖动滑块时的中间值（滑块只认 float，配置里有 int 字段）
 		std::vector<std::function<void()>> refreshers;
 
