@@ -70,7 +70,8 @@ def req(method, url, token, data=None, ctype='application/json'):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tag', required=True)
-    ap.add_argument('--exe', required=True, help='要上传的 exe（会作为 release 资产）')
+    ap.add_argument('--exe', required=True,
+                    help='要上传的 exe（会作为 release 资产）；传 - 表示只更新已有 release 的说明')
     ap.add_argument('--notes', default=None, help='release notes 的 markdown 文件')
     ap.add_argument('--target', default=None, help='tag 指向的 commit（默认当前 HEAD）')
     ap.add_argument('--name', default=None, help='release 标题（默认 tag）')
@@ -79,7 +80,8 @@ def main():
     args = ap.parse_args()
 
     # ⚠ 单独跑 --prune-config 时不需要 exe（比如清理一个老版本，本地产物已被用户删掉）。
-    need_exe = not args.prune_config
+    #   `--exe -` 同理：只更新已有 release 的说明，不碰资产。
+    need_exe = not args.prune_config and args.exe != '-'
     if need_exe and not os.path.exists(args.exe):
         print('!! 找不到 %s' % args.exe)
         return 1
@@ -110,6 +112,19 @@ def main():
     if st == 200:
         rel = body
         print('release 已存在：id=%s' % rel['id'])
+        # ⚠ `--exe` 传 '-' 表示"只更新说明，不碰资产"。
+        #   为什么需要：release 一旦建好就没法用本脚本改文案了 ——
+        #   而 notes 里的**双引号很容易被 bash 吃掉**（用 python -c 写文件时踩过），
+        #   改一次文案就得重发一版太蠢。
+        if args.exe == '-':
+            payload = json.dumps({'body': notes}).encode('utf-8')
+            st2, rel2 = req('PATCH', '%s/repos/%s/releases/%s' % (API, REPO, rel['id']),
+                            token, payload)
+            if st2 != 200:
+                print('!! 更新说明失败 HTTP %s\n%s' % (st2, rel2))
+                return 1
+            print('说明已更新：%s' % rel2['html_url'])
+            return 0
     elif st == 404:
         payload = json.dumps({
             'tag_name': args.tag,
