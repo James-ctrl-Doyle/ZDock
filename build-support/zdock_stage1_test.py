@@ -21,6 +21,8 @@ import os
 import struct
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_common import kill_existing_zdock   # noqa: E402
 import time
 import zlib
 from ctypes import wintypes as wt
@@ -413,6 +415,11 @@ def main():
 
     print('== ZDock 阶段一 gate 验证 ==')
     info('exe: ' + exe)
+
+    # ⚠ 先把在跑的实例关掉 —— ZDock 单实例互斥体名是固定的，留着它这次起的进程会
+    #   **静默让位退出**（日志只写一句"已有实例在运行"），看起来却像"程序启动就崩"。
+    #   按窗口类名找 pid，用户验收时跑的改名副本也杀得掉。见 _probe_common.py。
+    kill_existing_zdock()
 
     before = shell_chain_counts()
     info('启动前 explorer shell 窗口：' + str(before))

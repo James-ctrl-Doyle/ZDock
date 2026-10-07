@@ -32,6 +32,8 @@ import os
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_common import kill_existing_zdock   # noqa: E402
 import tempfile
 import time
 from ctypes import wintypes as wt
@@ -263,7 +265,9 @@ def kill(proc=None):
         except Exception:
             pass
     time.sleep(0.4)
-    subprocess.run(['taskkill', '/F', '/IM', 'ZDock.exe'], capture_output=True)
+    # ⚠ 收尾清理也要按窗口类名找 —— 用户验收时跑的是改名副本，
+    #   `/IM ZDock.exe` 对不上、杀不掉，会留着把后续探针全挡在单实例外面。
+    kill_existing_zdock(verbose=False)
 
 
 BASE_CFG = {

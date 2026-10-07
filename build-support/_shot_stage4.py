@@ -17,6 +17,8 @@ import shutil
 import struct
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_common import kill_existing_zdock   # noqa: E402
 import time
 import zlib
 from ctypes import wintypes as wt
@@ -169,7 +171,9 @@ def make_workdir(cfg):
 
 
 def kill():
-    subprocess.run(['taskkill', '/F', '/IM', 'ZDock.exe'], capture_output=True)
+    # ⚠ 不能只按映像名杀 —— 验收时跑的是改名副本（ZDock_0.1.x.exe），对不上。
+    #   按窗口类名找 pid 才杀得掉；见 _probe_common.py 的说明。
+    kill_existing_zdock(verbose=False)
 
 
 def main():

@@ -668,7 +668,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.10 · 设置窗口风格对齐");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.11 · 修图标叠加");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1102,9 +1102,25 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::destroyItemNode(DockItem& item)
 	{
-		// Ling 的节点由父节点持有，removeChild 会销毁它
+		// Ling 的节点由父节点持有，摘下来（detachChild 返回的 unique_ptr 就地析构）即销毁。
 		if (item.indicator && body) body->removeChild(item.indicator);
-		if (item.node && row) row->removeChild(item.node);
+
+		// ⚠⚠ 图标节点挂在**哪个容器**里要挨个试，不能一律 `row->removeChild()`：
+		//   临时项在 rowTemp、pinRight 的固定项在 rowRight、其余才在 row。
+		//   原来只问 row —— 对临时项来说 detachChild 在 row 的孩子里找不到它、
+		//   **静默返回 nullptr，节点就赖在 rowTemp 上了**。
+		//   后果很难看出来：那个图标**照样画得出来**，但 items 里已经没有它 →
+		//   面板宽度按"少一项"算 → 多出来的图标被挤出面板、糊在旁边
+		//   （用户报的"运行中再开程序，图标会叠在一起"就是这个）。
+		if (item.node) {
+			bool removed = false;
+			for (Ling::Node* host : { row, rowTemp, rowRight }) {
+				if (host && host->detachChild(item.node)) { removed = true; break; }
+			}
+			if (!removed) {
+				log(std::format(L"[dock] ⚠ 没找到要销毁的图标节点（{}）—— 容器归属不对？", item.name));
+			}
+		}
 		item.node = nullptr;
 		item.indicator = nullptr;
 	}

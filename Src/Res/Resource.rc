@@ -5,8 +5,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,10,0
- PRODUCTVERSION 0,1,10,0
+ FILEVERSION 0,1,11,0
+ PRODUCTVERSION 0,1,11,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "James-ctrl-Doyle"
             VALUE "FileDescription", "ZDock"
-            VALUE "FileVersion", "0.1.10.0"
+            VALUE "FileVersion", "0.1.11.0"
             VALUE "InternalName", "ZDock"
             VALUE "LegalCopyright", "Copyright (C) 2026 James-ctrl-Doyle"
             VALUE "OriginalFilename", "ZDock.exe"
             VALUE "ProductName", "ZDock"
-            VALUE "ProductVersion", "0.1.10.0"
+            VALUE "ProductVersion", "0.1.11.0"
         END
     END
     BLOCK "VarFileInfo"

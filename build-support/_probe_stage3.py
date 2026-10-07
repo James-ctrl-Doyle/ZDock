@@ -23,6 +23,8 @@ import ctypes
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_common import kill_existing_zdock   # noqa: E402
 import time
 from ctypes import wintypes as wt
 
@@ -163,8 +165,7 @@ def main():
         return 1
 
     # 干净起步：先确保没有残留
-    subprocess.run(['taskkill', '/F', '/IM', 'ZDock.exe'],
-                   capture_output=True, shell=False)
+    kill_existing_zdock(verbose=False)   # 按窗口类名找 pid，改名副本也杀得掉
     time.sleep(0.4)
 
     # 日志清空（旧日志会干扰"从这里往后看"）
@@ -273,7 +274,7 @@ def main():
     except Exception:
         pass
     time.sleep(0.4)
-    subprocess.run(['taskkill', '/F', '/IM', 'ZDock.exe'], capture_output=True)
+    kill_existing_zdock(verbose=False)
 
     print('\n================ 结果 ================')
     allok = True

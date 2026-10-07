@@ -11,6 +11,8 @@ import os
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _probe_common import kill_existing_zdock   # noqa: E402
 import time
 from ctypes import wintypes as wt
 
@@ -33,7 +35,7 @@ def title_of(hwnd):
 
 
 def main():
-    subprocess.run(['taskkill', '/F', '/IM', 'ZDock.exe'], capture_output=True)
+    kill_existing_zdock(verbose=False)
     d = os.path.join(ROOT, '_tmp_default')
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
