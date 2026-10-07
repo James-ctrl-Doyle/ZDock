@@ -33,7 +33,8 @@ import shutil
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _probe_common import kill_existing_zdock   # noqa: E402
+from _probe_common import (kill_existing_zdock, snapshot_work_area,
+                           restore_work_area)   # noqa: E402
 import tempfile
 import time
 from ctypes import wintypes as wt
@@ -661,13 +662,22 @@ def main():
         print('!! 找不到 %s' % EXE)
         return 1
 
-    kill()
+    # ⚠ 开跑先关掉在跑的实例（单实例互斥会让后面起的进程静默让位），
+    #   然后**在这个干净时刻**把工作区记下来 —— 收尾要写回它。
+    #   这个段会故意强杀 dock 来测自愈，强杀会把 AppBar 占用留在 shell 里，
+    #   而用户用的是全屏开始菜单（按工作区布局）→ 不收尾他的开始菜单就会上移。
+    kill_existing_zdock()
+    snapshot_work_area()
+
     case_aoff()
     case_auto()
     case_appbar()
     case_taskbar()
     case_fullscreen()
     kill()
+
+    # ⚠ 收尾一定要写回工作区：AppBar 占用是全局状态，强杀不会自动清。
+    restore_work_area()
 
     print('\n================ 结果 ================')
     allok = True
