@@ -3,9 +3,10 @@
 Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标，支持悬停鱼眼放大、点击启动。
 
 当前进度：**阶段六已完成；v0.1.8 七条体验修正、v0.1.9 设置窗口改版、
-v0.1.13/v0.1.14 设置界面细修（注解行样式 / 滚动后鼠标错位）**，
+v0.1.13/v0.1.14 设置界面细修（注解行样式 / 滚动后鼠标错位）、
+v0.1.15 升到 Ling v1.4.0（滚动容器根治，ZDock 侧两处兜底退休）**，
 阶段七（本地化 + 崩溃恢复 + 诊断导出）未开始。
-（v0.1.4 ~ v0.1.14 均已发布 GitHub Release；依赖 **Ling v1.3.1**。
+（v0.1.4 ~ v0.1.15 均已发布 GitHub Release；依赖 **Ling v1.4.0**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
 拖放 14 项、位置配置 18 项、设置/自启/显示器 17 项、设置滚动命中 4 项探针全 PASS；
 过程中挖出的 bug 已根因级修复，见 `CHANGELOG.md`）。
@@ -219,8 +220,11 @@ bash build-support/build.sh
 ```
 
 - 直接调 `cl.exe / link.exe / rc.exe`，**不走 MSBuild**（本机没有 .NET SDK，也不需要）。
-- Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-v1.3.1-x64`（发布包）→ `../Ling`（源码树）。
-  当前锁 **v1.3.1**（修了 `App::appID` 的编译期常量问题）。`LING_FROM_SOURCE=1` 强制用源码树。
+- Ling 静态库来源按优先级：`$LING_ROOT` → `../Ling/dist/ling-<版本>-x64`（发布包）→ `../Ling`（源码树）。
+  **版本号只在 `build-support/_ling_pkg.sh` 里写一次**（升 Ling 改那一行即可；
+  以前抄在 build.sh + 三个 dev 探针里，升 v1.4.0 时漏改过三个探针）。
+  当前锁 **v1.4.0**（滚动容器根治：`makeChild` 所有权回归真正的 `parent`）。
+  `LING_FROM_SOURCE=1` 强制用源码树。
 - 产物：`build/bin/ZDock.exe`（约 830 KB）。
 
 依赖的硬约定（踩过的坑，改构建脚本前先看 `build-support/build.sh` 里的注释）：

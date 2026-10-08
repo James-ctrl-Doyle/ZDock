@@ -25,8 +25,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${LING_FROM_SOURCE:-0}" = "1" ]; then
     LING_ROOT="$ROOT/../Ling"
 else
-    LING_ROOT="${LING_ROOT:-$ROOT/../Ling/dist/ling-v1.4.0-x64}"
-    [ -d "$LING_ROOT/include" ] || LING_ROOT="$ROOT/../Ling"
+    # ⚠ 版本号只在 _ling_pkg.sh 里写一次；升 Ling 改那个文件即可
+    . "$ROOT/build-support/_ling_pkg.sh"
+    LING_ROOT="$(ling_resolve_root "$ROOT")"
 fi
 [ -d "$LING_ROOT/include" ] || { echo "找不到 Ling（试过 $LING_ROOT）" >&2; exit 1; }
 echo "Ling : $LING_ROOT"

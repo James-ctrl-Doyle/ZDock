@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/build-support/_msvc_env.sh"
 
 SRC_NAME="${1:?用法: _probe_ling_build.sh <源文件名（不含路径/扩展名）>}"
-LING_ROOT="$ROOT/../Ling/dist/ling-v1.3.1-x64"
+. "$ROOT/build-support/_ling_pkg.sh"
+LING_ROOT="$(ling_resolve_root "$ROOT")"
 [ -d "$LING_ROOT/include" ] || { echo "找不到 $LING_ROOT" >&2; exit 1; }
 
 OUT="$ROOT/build/_probe_ling/$SRC_NAME"

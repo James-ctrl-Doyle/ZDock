@@ -3,14 +3,15 @@
 # 用来验证 Ling 包的 appID 行为（v1.3.0 是编译期常量、v1.3.1 起按 exe 路径哈希）。
 #
 # 用法：
-#   bash build-support/_probe_ling_appid.sh                 # 用默认（v1.3.1）包
+#   bash build-support/_probe_ling_appid.sh                 # 用默认包（版本见 _ling_pkg.sh）
 #   bash build-support/_probe_ling_appid.sh ling-v1.3.0     # 指定包目录名
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/build-support/_msvc_env.sh"
 
-PKG="${1:-ling-v1.3.1}"
+. "$ROOT/build-support/_ling_pkg.sh"
+PKG="${1:-ling-${LING_PKG_VER}}"
 LING_ROOT="$ROOT/../Ling/dist/$PKG-x64"
 [ -d "$LING_ROOT/include" ] || { echo "找不到 $LING_ROOT" >&2; exit 1; }
 

@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## 0.1.15 · 升到 Ling v1.4.0（滚动容器根治）+ 清掉 ZDock 侧两处兜底 — 2026-10-08
+
+Ling 侧按 `notes/2026-10-08-Ling滚动容器根治清单.md` 落地（commit `bc05a1f`，tag `v1.4.0`）：
+
+- **根因**：`Node::makeChild` 的所有权回归**真正的 `parent`**。原先一律塞 `this->children`，
+  而 `ScrollerBox::setChild` 把新节点挂在内部 `content` 上 → 所有权与 `parent` 对不上，
+  `shiftHitY()` / `layout()` 沿 `content->children` 递归时**漏掉那些节点**
+  → 视觉滚了、命中坐标没滚（就是 0.1.14 里 ZDock 绕开的那个）
+- `ScrollerBox` 四个未初始化成员补默认值（`scrollY = -nan` 的源头）
+- `setScroll` 加 `isfinite` 防御；`layout()` 加断言"直接子节点只能有 content 一个"
+- 滚动 / 重排后由 `WinBase::refreshHover()` 重播 hover（框架层做，取代 ZDock 的临时补投）
+
+ZDock 侧配套：
+
+- `build-support/build.sh` 指向 `dist/ling-v1.4.0-x64`
+- **删掉两处兜底**（Ling 根治后已多余）：① 建完 UI 投 `WM_LBUTTONUP` 复位垃圾拖动状态；
+  ② 滚轮回调里补投 `WM_MOUSEMOVE` 重算 hover。滚轮回调本身保留（只做几何诊断）
+- **版本号收口**：新增 `build-support/_ling_pkg.sh`（Ling 版本只写一处），
+  `build.sh` 与三个 dev 探针统一走 `ling_resolve_root()` —— 原先版本号抄在 **4 个地方**，
+  这轮升 v1.4.0 时漏改了三个探针
+
+验证（换库 + 删兜底之后重跑）：
+
+- 命中判决 `_probe_hit_after_scroll.py` **4/4**：滚动 4 格后点"按钮显示位置"改到
+  `dockEdge`、点"用户鼠标位置"改到 `hideOnFullscreen`（和 0.1.14 的兜底版结果一致）
+- 几何诊断：`scrollY` 74/148/222/296 与控件 `y` 的位移一一对应，**不再出现 NaN**
+- 设置窗口渲染与升级前**逐字节一致**（同一张 PNG，19042 字节）
+- 回归：阶段一 24/24、阶段三 13/13、阶段四 48/48、显示环境 26/26、拖放 14/14、
+  位置配置 18/18、设置/自启 17/17
+
+版本号 0.1.14.0 → 0.1.15.0。
+
 ## 0.1.14 · 修「设置窗口滚动之后鼠标错位」— 2026-10-07
 
 ### 用户报的现象

@@ -88,30 +88,18 @@ namespace zdock {
 		scroller->setPosition(Ling::Edge::Left, 0.f);
 		scroller->setPosition(Ling::Edge::Top, kTitleH);
 		scroller->setSize(kWinW, kWinH - kTitleH);
-		// ⚠⚠ 必须直接用 ScrollerBox **自己的** content 节点，绝不能再包一层。
-		//
-		//   原先写的是 `content = scroller->makeChild<Ling::Node>()`（想加个容器），
-		//   看起来无害，实际会把两套父子关系搞成对不上的：
-		//     · `Node::makeChild` 把新节点塞进 **ScrollerBox::children**（外层自己的）
-		//     · 而 `ScrollerBox::setChild` 又把新节点的 `parent` 指向 **ScrollerBox::content**
-		//   于是 `ScrollerBox::setScroll()` 里那句 `content->shiftHitY(-delta)`
-		//   —— 它沿 `content->children` 递归，而那是**空的** —— **永远到不了这些行**。
-		//
-		//   后果（用户 2026-10-07 报的"滚动之后鼠标错位"）：
-		//   视觉侧由 `content->visual.Offset` 平移，滚得好好的；
-		//   命中侧 `isPosIn` 用的 x/y **一直停在未滚动的位置** ——
-		//   滚动之后点哪儿都错位（点"按钮显示的地方"命中的是上面几百像素外的控件）。
-		//   插桩证据：滚一格后 scrollY=74，而"停靠边/上"的 y 仍是 492（未滚动值）。
+		// 直接用 ScrollerBox **自己的** content 层当内容根（框架就是拿它做滚动的）：
+		// 所有设置行都挂在它下面，滚动时它们才会既跟着动、又能被点准。
 		content = scroller->content;
 
-		// ⚠ 顺手兜一下 Ling `ScrollerBox` 的**未初始化成员**：`scrollY` / `scrollerDragging`
-		//   / `dragStartMouseY` / `dragStartScrollY` 在它的构造函数里都没赋值
-		//   （见 ScrollerBox.h 的成员声明）。若 `scrollerDragging` 恰好是垃圾"真"值，
-		//   此后**任何一次鼠标移动**都会走进"拖滚动条"分支，用垃圾的 dragStart* 重算
-		//   滚动量 —— 实测能把 scrollY 算成 NaN（诊断日志里出现过 `scrollY=-nan`）。
-		//   投一条抬起消息就能复位（`ScrollerBox::onUp` 只做"置 false + 释放捕获"）；
-		//   根治要等 Ling 侧把成员初始化补上。
-		if (hwnd) PostMessageW(hwnd, WM_LBUTTONUP, 0, 0);
+		// ⚠ 这里曾经踩过一个坑（2026-10-07），留给以后：**别自己再包一层**
+		//   （`content = scroller->makeChild<Ling::Node>()`）。当时的 Ling（≤ v1.3.1）
+		//   把新节点的所有权记在 `this->children`、而 `parent` 指向 `ScrollerBox::content`
+		//   —— 两套父子关系对不上，`setScroll()` 里的 `shiftHitY()` 沿 `content->children`
+		//   递归时**到不了这些行**：视觉滚了、命中坐标没滚（滚动后点哪儿都错位，
+		//   插桩实测 scrollY=74 而控件 y 仍是未滚动的 492）。
+		//   **Ling v1.4.0（commit bc05a1f）已根治**：所有权回归真正的 `parent`，
+		//   所以那种写法现在也对了。这里继续直接用 content，纯粹是少一层节点。
 	}
 
 	void SettingsWin::createOnce()
@@ -543,26 +531,18 @@ namespace zdock {
 			}
 			});
 
-		// ⚠⚠ 滚轮滚动之后补一次鼠标移动广播。
+		// 滚轮滚动之后的几何诊断（ZDOCK_VERBOSE_SETTINGS=1 时才有输出）。
+		// 这个回调挂在 ScrollerBox 之后 → 跑的时候 `ScrollerBox::onWheel` 里的
+		// `setScroll()` 已经走完，打出来的就是**滚动后**的坐标。
 		//
-		// 为什么需要：滚动会把内容里的**所有控件整体移位**，但**鼠标并没有动** ——
-		// 而 Button 的 hover 状态只在 `onMouseMove` 里更新，于是"滚动前被鼠标指着的那一个"
-		// 会把高亮一直挂在自己身上。用户 2026-10-07 报的就是这个：鼠标明明在下面
-		// 「全屏时让位」那一行，上面「停靠边」的「上」按钮却亮着。
-		//
-		// 做法：投一条 `WM_MOUSEMOVE`，带上**当前光标的真实客户区坐标**，
-		// 让所有控件按"滚动后"的位置重判一遍 hover。
-		// ⚠ 用 `PostMessage` 而不是直接调：它进消息队列尾，**保证排在这次滚动处理之后**，
-		//   不会出现"我们先重算了 hover、ScrollerBox 才去滚动"的倒序。
+		// ⚠ 这里原来还补投一条 `WM_MOUSEMOVE`：因为 Button 的 hover 只在
+		//   `onMouseMove` 里更新，而滚动把控件整体移走时鼠标并没有动 →
+		//   滚动前被指着的那一个会把高亮粘住（ZDock 0.1.13 修的就是这个）。
+		//   **Ling v1.4.0 已经在框架里做了**（`WinBase::refreshHover()`，由
+		//   `ScrollerBox::onWheel` 与 `WinBase::layout()` 调用），这里把那几行删了。
 		this->onMouseWheel.add([this](POINT, float) {
 			if (!hwnd) return;
-			// 诊断：先记录"滚动后"的几何（这个回调挂在 ScrollerBox 之后，
-			// 所以 ScrollerBox::onWheel 已经把 setScroll 走完了）
 			dumpHitGeom(L"after-wheel");
-			POINT pt{};
-			if (!GetCursorPos(&pt)) return;
-			ScreenToClient(hwnd, &pt);
-			PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(pt.x, pt.y));
 			});
 
 		syncFromConfig();
