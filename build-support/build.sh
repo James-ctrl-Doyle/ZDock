@@ -5,7 +5,7 @@
 #
 # Ling 静态库来源（按优先级）：
 #   1) $LING_ROOT
-#   2) ../Ling/dist/ling-v1.3.1-x64      —— Ling 仓库打出来的发布包（含 include/ + x64/Release）
+#   2) ../Ling/dist/ling-v1.4.0-x64      —— Ling 仓库打出来的发布包（含 include/ + x64/Release）
 #   3) ../Ling                            —— Ling 源码树（布局与发布包一致）
 #   LING_FROM_SOURCE=1 强制走源码树。
 #
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${LING_FROM_SOURCE:-0}" = "1" ]; then
     LING_ROOT="$ROOT/../Ling"
 else
-    LING_ROOT="${LING_ROOT:-$ROOT/../Ling/dist/ling-v1.3.1-x64}"
+    LING_ROOT="${LING_ROOT:-$ROOT/../Ling/dist/ling-v1.4.0-x64}"
     [ -d "$LING_ROOT/include" ] || LING_ROOT="$ROOT/../Ling"
 fi
 [ -d "$LING_ROOT/include" ] || { echo "找不到 Ling（试过 $LING_ROOT）" >&2; exit 1; }
