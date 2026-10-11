@@ -479,6 +479,24 @@ namespace zdock {
 		for (const auto& g : groupList) {
 			if (g.key == want) return &g;
 		}
+		// ⚠⚠ 只按 key 找会**漏掉带 AUMID 的分组**：`groupKeyOf()` 是"有 AUMID 就用
+		//   `aumid:`，否则用 `path:`"（见该函数），而 Chrome / Edge / Steam 这些从
+		//   快捷方式启动的应用，窗口都带 AUMID（实测 Chrome 就是 `aumid:Chrome`）
+		//   —— 这种 key 里**根本没有路径**，按 "path:" 永远找不到它，
+		//   尽管 `g.exePath` 是有值的。
+		//
+		//   后果（用户 2026-10-11 报的"固定之后多出一个 chrome 图标"）：
+		//   ① 固定项认不出自己的运行分组 → 抑制临时图标那条判断失效 → 同一个应用
+		//      既有一条固定项、又补一条临时图标；
+		//   ② 固定图标不显示"运行中"小圆点（groupOfItem 返回 null）；
+		//   ③ 点固定图标会**再启动一个实例**，而不是切到已经开着的窗口。
+		//
+		//   所以这里再按 exePath 字段兜一次（大小写不敏感）。同一个 exe 可能同时
+		//   存在"带 AUMID / 不带 AUMID"两个分组，那是调用方要考虑的事 —— 见
+		//   DockWin::syncWithTracker 里按路径逐个分组判定的写法。
+		for (const auto& g : groupList) {
+			if (!g.exePath.empty() && _wcsicmp(g.exePath.c_str(), exePath.c_str()) == 0) return &g;
+		}
 		return nullptr;
 	}
 

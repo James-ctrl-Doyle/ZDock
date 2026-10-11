@@ -16,6 +16,7 @@
 """
 
 import argparse
+import json
 import ctypes
 import os
 import struct
@@ -423,6 +424,30 @@ def main():
 
     before = shell_chain_counts()
     info('启动前 explorer shell 窗口：' + str(before))
+
+    # ⚠ 起之前先把**与环境有关**的配置项写成确定值（其余键保留原样，特别是 items ——
+    #   这个 gate 的坐标是按"左固定组第 3 个图标"算的，items 少了就点空）。
+    #
+    #   为什么必须写：`hideOnFullscreen` 默认 **true**，判定是"前台窗口矩形盖住监视器"。
+    #   用户只要有个全屏/无边框最大化的窗口在前台（实测 Chrome 的窗口是
+    #   (-9,29)-(2569,1449)），dock 就按设计把自己藏起来 —— 于是"悬停有变化 /
+    #   面板归属 / halo 穿透"三条断言必然失败，看着像程序坏了，其实是环境。
+    #   gate 不该被用户桌面上开着什么打败。
+    cfg_path = os.path.join(os.path.dirname(exe), 'config.json')
+    try:
+        with open(cfg_path, encoding='utf-8') as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    # ⚠ 只钉"与环境有关"的项，**位置类字段一律不碰**（dockEdge / dockAlign / dockOffset
+    #   会影响"贴底 / 水平居中"那些断言 —— 第一版补丁钉了 dockAlign=start，
+    #   把"水平居中于屏幕"钉挂了，正好说明这类字段不能动）。
+    cfg.update({'iconSize': 48, 'iconGap': 12,
+                'autoHide': False, 'hideOnFullscreen': False,
+                'reserveWorkArea': False, 'autoStart': False})
+    with open(cfg_path, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    info('已写入确定性配置（hideOnFullscreen=false 等）：' + cfg_path)
 
     proc = subprocess.Popen([exe], cwd=os.path.dirname(exe))
     hwnd = find_dock_window(8.0)

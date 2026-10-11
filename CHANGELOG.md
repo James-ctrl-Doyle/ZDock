@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## 0.1.16 · 修「右键固定一个程序之后出现两个图标」— 2026-10-11
+
+### 现象
+
+> "将右键固定一个程序后，会创建一个新的图标，比如现在 dock 栏上就有两个 chrome 图标"
+
+### 根因：分组键与查找方式不匹配（AUMID）
+
+`WindowTracker` 的分组键规则是 **"有 AUMID 就用 `aumid:`，否则用 `path:<小写路径>`"**
+（`groupKeyOf()`）。而 Chrome / Edge / Steam 这些**从快捷方式启动**的应用，窗口都带
+AppUserModelID —— 实测这台机器上 Chrome 的分组键就是 `aumid:Chrome`。
+但 `DockWin` 找分组用的是 `findByExePath()`，它当时**只比对 `"path:" + 小写路径`**，
+对 `aumid:` 键的分组永远找不到（尽管该分组的 `g.exePath` 是有值的）。
+
+于是"抑制临时图标"那条判断里，固定项拿到的 key 跟正在跑的分组 key 对不上
+→ **同一个应用既有一条固定项、又补了一条临时图标 = 两个图标**。
+
+### 修法（两处）
+
+1. `WindowTracker::findByExePath()`：按 key 找不到时，**再按 `exePath` 字段兜一次**
+   （大小写不敏感）。注释里写清了为什么单靠 key 不行。
+2. `DockWin::syncWithTracker()`：抑制临时图标的判据从"比分组键"改成
+   **逐个运行分组比 exe 路径** —— 同一个 exe 完全可能同时存在带 AUMID / 不带 AUMID
+   两个分组，只取一个 key 去比不够。
+
+### 怎么复现与验证的
+
+**不去动用户正在用的 Chrome**：新增 `build-support/_probe_aumid_app.cpp`（+ `.sh`），
+编出一个**自带 AUMID 的窗口探针**，等价于"从带 AppUserModelID 的快捷方式启动的 Chrome"，
+并且**自检**（用和 ZDock **完全相同**的 API 路径把 AUMID 读回来，
+避免"我设上了 ≠ 它读得到"）。
+
+新增 `build-support/_repro_pin_duplicate.py`：配置里固定这个 AUMID 应用、并让它正在运行
+（= 用户"右键固定之后"的状态），读新增的逐项诊断（`ZDOCK_VERBOSE_ITEMS=1`）：
+
+```
+修复前： [items] #1 PINNED 'AUMID 探针' key=''                              ← 没认出运行分组
+        [items] #4 TEMP   'AumidProbeApp' key='aumid:ZDock.Probe.AumidApp'  ← 多出来的那个
+修复后： [items] #1 PINNED 'AUMID 探针' key='aumid:ZDock.Probe.AumidApp'    ← 没有 TEMP 了
+```
+dock 面板宽度也从 808 缩到 659（少占一格）。
+
+### 顺带
+
+- 新增诊断 **`ZDOCK_VERBOSE_ITEMS=1`**：把 items 逐条打出来（path / temporary / groupKey）。
+  这类"同一应用两个图标"的问题，日志里那行**总数**会被机器上其它正在跑的应用搅乱，
+  逐条打印才看得清是哪一步的匹配断了。
+- ⚠ **修了 stage1 gate 的一个环境脆弱点**：`hideOnFullscreen` 默认 `true`，用户只要有
+  全屏 / 无边框最大化的窗口在前台，dock 就**按设计**把自己藏起来 —— 于是
+  "悬停有变化 / 面板归属 / halo 穿透"三条断言必然失败（实测 Chrome 窗口是
+  `(-9,29)-(2569,1449)` 时掉到 21/24，看着像程序坏了，其实是环境）。
+  现在 gate 起之前会把**环境相关**的配置项写成确定值；
+  ⚠ **位置类字段一律不碰** —— 第一版补丁顺手钉了 `dockAlign=start`，
+  把"水平居中于屏幕"一条钉挂了，正好说明这类字段不能动。
+
+### 测试
+
+新增 `_repro_pin_duplicate.py`（判据：同一个 exe 有没有同时出现 PINNED 和 TEMP）。
+回归全绿：阶段一 **24/24**、阶段三 26 项检查全 PASS、阶段四 **48/48**、显示环境 **26/26**、
+拖放 **14/14**、位置配置 **18/18**、设置/自启 **17/17**、设置滚动命中 **4/4**。
+
+⚠ 试过拿"运行指示器小圆点"和"点固定图标会不会再起一个实例"当第二条判据，**两条都分辨不出
+好坏**（修复前它们就已经是"正常"表现，原因没查清），所以只留了上面那条确定性判据。
+
+版本号 0.1.15.0 → 0.1.16.0。
+
 ## 0.1.15 · 升到 Ling v1.4.0（滚动容器根治）+ 清掉 ZDock 侧两处兜底 — 2026-10-08
 
 Ling 侧按 `notes/2026-10-08-Ling滚动容器根治清单.md` 落地（commit `bc05a1f`，tag `v1.4.0`）：

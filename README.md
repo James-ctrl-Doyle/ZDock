@@ -4,9 +4,10 @@ Windows x64 桌面 Dock 栏。贴屏幕边缘的半透明面板 + 应用图标�
 
 当前进度：**阶段六已完成；v0.1.8 七条体验修正、v0.1.9 设置窗口改版、
 v0.1.13/v0.1.14 设置界面细修（注解行样式 / 滚动后鼠标错位）、
-v0.1.15 升到 Ling v1.4.0（滚动容器根治，ZDock 侧两处兜底退休）**，
+v0.1.15 升到 Ling v1.4.0（滚动容器根治，ZDock 侧两处兜底退休）、
+v0.1.16 修「固定之后出现两个图标」（AUMID 分组匹配）**，
 阶段七（本地化 + 崩溃恢复 + 诊断导出）未开始。
-（v0.1.4 ~ v0.1.15 均已发布 GitHub Release；依赖 **Ling v1.4.0**。
+（v0.1.4 ~ v0.1.16 均已发布 GitHub Release；依赖 **Ling v1.4.0**。
 阶段一 gate 24/24，阶段二 12 项、阶段三 13 项、阶段四 48 项、显示环境 26 项、
 拖放 14 项、位置配置 18 项、设置/自启/显示器 17 项、设置滚动命中 4 项探针全 PASS；
 过程中挖出的 bug 已根因级修复，见 `CHANGELOG.md`）。
@@ -252,6 +253,8 @@ bash build-support/build.sh
 <python> build-support/_shot_default.py                # 默认配置截图 + 回收站图标提取
 <python> build-support/_probe_layout.py               # 位置配置：4 停靠边 / 对齐 / 偏移（18 项）
 <python> build-support/_probe_settings.py             # 设置窗口 / 自启 / 显示器锚定（17 项）
+bash build-support/_probe_aumid_app.sh               # 编"AUMID 窗口探针"（下一条要用）
+<python> build-support/_repro_pin_duplicate.py        # 固定之后有没有重复图标（AUMID 分组）
 <python> build-support/_probe_hit_after_scroll.py      # 设置滚动后命中在哪（点击判决，4 例）
 <python> build-support/_diag_hitgeom.py                # 几何诊断（需 ZDOCK_VERBOSE_SETTINGS=1）
 bash build-support/_shot_settings.py                 # 阶段六截图 → build/_review/

@@ -668,7 +668,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.15 · 升 Ling v1.4.0");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.16 · 修固定后重复图标");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -998,12 +998,19 @@ namespace zdock {
 			if (g.running()) running.push_back(g.key);
 		}
 
-		// 固定项覆盖了哪些键（这些不该再出临时图标）
-		std::vector<std::wstring> pinned;
-		for (const auto& item : items) {
-			if (item.temporary) continue;
-			if (const AppGroup* g = tracker.findByExePath(item.path)) pinned.push_back(g->key);
-		}
+		// 固定项是否覆盖了这个运行分组（覆盖了就不该再出临时图标）。
+		// ⚠ 判据用**exe 路径**逐个分组比，不要"先取一个分组键、再拿键去比对"：
+		//   带 AUMID 的分组键是 `aumid:`（键里没有路径），而且同一个 exe 完全可能
+		//   同时存在两个分组（一个带 AUMID、一个不带）。用户 2026-10-11 报的
+		//   "固定之后又多出一个 chrome 图标"就是前者漏判造成的。
+		auto pinnedCovers = [this](const AppGroup& g) {
+			if (g.exePath.empty()) return false;
+			for (const auto& item : items) {
+				if (item.temporary || item.path.empty()) continue;
+				if (_wcsicmp(item.path.c_str(), g.exePath.c_str()) == 0) return true;
+			}
+			return false;
+			};
 
 		bool structural = false;
 
@@ -1027,7 +1034,7 @@ namespace zdock {
 		// 2) 新出现的、没被固定的运行分组 → 补临时图标（就地造节点）
 		for (const auto& g : tracker.groups()) {
 			if (!g.running()) continue;
-			if (std::find(pinned.begin(), pinned.end(), g.key) != pinned.end()) continue;
+			if (pinnedCovers(g)) continue;
 			bool exists = false;
 			for (const auto& item : items) {
 				if (item.temporary && item.groupKey == g.key) { exists = true; break; }
@@ -1086,6 +1093,23 @@ namespace zdock {
 			}
 		}
 		refreshIndicators();
+
+		// 诊断：ZDOCK_VERBOSE_ITEMS=1 时把 items 逐条打出来。
+		// ⚠ 为什么要逐条：这类"同一个应用出现两个图标 / 固定项认不出自己的运行分组"
+		//   的问题，日志里那行**总数**（"Dock 共 N 项，其中临时 K"）会被机器上
+		//   其它正在跑的应用搅乱，分不清是谁多了。逐条打 path / temporary / groupKey
+		//   就能一眼看出是哪一步的匹配断了（固定项的 key 为空 = 没匹配上运行分组）。
+		static const bool verboseItems = [] {
+			wchar_t buf[8]{};
+			return GetEnvironmentVariableW(L"ZDOCK_VERBOSE_ITEMS", buf, 8) > 0;
+			}();
+		if (verboseItems) {
+			for (size_t i = 0; i < items.size(); ++i) {
+				const auto& it = items[i];
+				log(std::format(L"[items] #{} {} '{}' key='{}' path={}",
+					i, it.temporary ? L"TEMP  " : L"PINNED", it.name, it.groupKey, it.path));
+			}
+		}
 
 		if (runningChanged || structural) {
 			int tempCount = 0;
