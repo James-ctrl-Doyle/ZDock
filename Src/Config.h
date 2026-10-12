@@ -78,6 +78,18 @@ namespace zdock {
 		int  slideInMs{ 200 };
 		/// <summary>滑出动画时长（毫秒）。任务书 §3 定 300。</summary>
 		int  slideOutMs{ 300 };
+		/// <summary>
+		/// 自动隐藏热区的**厚度**（物理像素）—— 贴屏幕边缘那条隐形细窗有多厚。
+		/// 默认 4。早期写死 3px 且不可调，高 DPI 屏上很难碰准，于是提到配置里。
+		/// 范围 1~20，超出回默认。
+		/// </summary>
+		int  hotZoneThickness{ 4 };
+		/// <summary>
+		/// 自动隐藏热区**沿停靠边的覆盖范围**：
+		/// `"dock"` 只覆盖面板宽度 / `"half"` 半屏居中（默认）/ `"full"` 整条边。
+		/// 默认 `"half"` 与历史行为最接近（此前固定为 max(面板宽, 屏宽/2)）。
+		/// </summary>
+		std::wstring hotZoneSpan{ L"half" };
 		/// <summary>全屏应用在前台时保持隐藏（自动隐藏开启时才有意义）。</summary>
 		bool hideOnFullscreen{ true };
 		/// <summary>

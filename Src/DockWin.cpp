@@ -97,6 +97,10 @@ namespace zdock {
 		cfgHideDelayMs = cfg->autoHideDelayMs;
 		cfgSlideInMs = cfg->slideInMs;
 		cfgSlideOutMs = cfg->slideOutMs;
+		cfgHotZoneThickness = cfg->hotZoneThickness;
+		cfgHotZoneSpan = HotZoneSpan::Half;
+		if (cfg->hotZoneSpan == L"dock") cfgHotZoneSpan = HotZoneSpan::Dock;
+		else if (cfg->hotZoneSpan == L"full") cfgHotZoneSpan = HotZoneSpan::Full;
 		cfgHideOnFullscreen = cfg->hideOnFullscreen;
 		cfgReserveWorkArea = cfg->reserveWorkArea;
 
@@ -320,6 +324,19 @@ namespace zdock {
 		// 阶段四：自动隐藏与工作区预留都依赖"窗口已经就位 + 跟踪器已能报全屏"，
 		// 所以放在最后。默认两个都是关的 → 行为与阶段三完全一致。
 		applyAutoHideConfig();
+
+		// 启动即收起（用户 2026-10-12 提）：开了自动隐藏，就别让 dock 一上来
+		// 就横在屏幕上等人来碰 —— 之前它总是以展开态启动，要等鼠标扫过一次才收。
+		// ⚠ 直接落位、**不播滑出动画**：启动那一下播动画只是拖慢"进入可用状态"。
+		// ⚠ 放在 syncAppBar() **之前** —— AppBar 的批准矩形按 slideState 算
+		//   （见 syncAppBar 里 `slideState == Hidden ? h : 0`），顺序反了会拿展开态
+		//   去注册，工作区被多推一格。
+		if (cfgAutoHide && !shouldHideNow()) {
+			slideState = SlideState::Hidden;
+			slideT = 1.f;
+			applyDockPlacementHidden();
+			log(L"[dock] 启动即收起（自动隐藏已启用）");
+		}
 		// ⚠ 先自愈再注册：把上次强杀可能留下的工作区占用清掉（红线 7）。
 		//   顺序不能反 —— 否则我们会基于一个"被污染的工作区"去算位置，
 		//   而且新注册会与残留叠加（实测工作区会被吃掉两份）。
@@ -668,7 +685,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.17 · 过滤无路径窗口");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.18 · 自动隐藏完善");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1707,8 +1724,12 @@ namespace zdock {
 			const RECT hz = hotZoneRect();
 			if (!hotZone.alive()) hotZone.create(hz);
 			else hotZone.moveTo(hz);
-			log(std::format(L"[dock] 自动隐藏已启用（延迟 {}ms / 滑入 {}ms / 滑出 {}ms / 全屏让位 {}）",
-				cfgHideDelayMs, cfgSlideInMs, cfgSlideOutMs, cfgHideOnFullscreen ? 1 : 0));
+			log(std::format(L"[dock] 自动隐藏已启用（延迟 {}ms / 滑入 {}ms / 滑出 {}ms / 全屏让位 {} / 热区 {}x{}px 范围={}）",
+				cfgHideDelayMs, cfgSlideInMs, cfgSlideOutMs, cfgHideOnFullscreen ? 1 : 0,
+				hz.right - hz.left, hz.bottom - hz.top,
+				cfgHotZoneSpan == HotZoneSpan::Full ? L"整条边"
+				: (cfgHotZoneSpan == HotZoneSpan::Dock ? L"仅面板宽" : L"半屏")));
+			syncHotZoneEnabled();
 		}
 		else {
 			// 关掉自动隐藏要立刻销毁热区 ——
@@ -1736,7 +1757,7 @@ namespace zdock {
 		// ⚠ 同样锚监视器，不锚工作区 —— 否则热区会跟着 AppBar 预留一起上爬，
 		//   越爬越高，最后鼠标够不到。
 		const RECT mon = monitorRect();
-		const int thick = 3;   // 物理像素，任务书 §4 定 3px
+		const int thick = std::max(1, cfgHotZoneThickness);   // 物理像素，可配（1~20）
 
 		// 面板在屏幕上的位置（窗口矩形 + halo 偏移反推）
 		const RECT wr = dockRectShown();
@@ -1753,7 +1774,7 @@ namespace zdock {
 			// ⚠ 沿边范围以**面板中心**为中心（不是屏幕中心）—— 这样 dock 换成
 			//   align=start/end 之后热区会跟着走，用户仍然能对着 dock 划过去。
 			const int monW = mon.right - mon.left;
-			const int wantW = std::max(panelWpx, monW / 2);
+			const int wantW = (cfgHotZoneSpan == HotZoneSpan::Full) ? monW : (cfgHotZoneSpan == HotZoneSpan::Dock ? panelWpx : std::max(panelWpx, monW / 2));   // Full=整条边 / Dock=仅面板宽 / 默认 Half
 			const int cx = panelLeft + panelWpx / 2;
 			// ⚠ 都先收成 int 再比 —— LONG 和 int 在 Windows 上是不同类型，
 			//   直接 std::max(LONG, int) 会模板推导失败（C2672）。
@@ -1773,7 +1794,7 @@ namespace zdock {
 		else {
 			// 纵向细条，贴屏幕的左边或右边
 			const int monH = mon.bottom - mon.top;
-			const int wantH = std::max(panelHpx, monH / 2);
+			const int wantH = (cfgHotZoneSpan == HotZoneSpan::Full) ? monH : (cfgHotZoneSpan == HotZoneSpan::Dock ? panelHpx : std::max(panelHpx, monH / 2));
 			const int cy = panelTop + panelHpx / 2;
 			const int t = std::max(static_cast<int>(mon.top), cy - wantH / 2);
 			const int b = std::min(static_cast<int>(mon.bottom), t + wantH);
@@ -1801,6 +1822,19 @@ namespace zdock {
 		else {
 			hotZone.destroy();
 		}
+		syncHotZoneEnabled();
+	}
+
+	// ---------------------------------------------------------------------------
+	// 热区是否参与命中。
+	// 判据取 `shouldHideNow()`（= 因全屏让位而收起）—— 此时 dock 在屏幕外，
+	// 热区若还接收鼠标，就等于把全屏游戏 / 视频贴着屏幕边缘的那几像素点击吃掉了。
+	// ⚠ 隐藏而非销毁：探针仍可用 PostMessage 驱动（见 EdgeHotZone::setEnabled）。
+	// ---------------------------------------------------------------------------
+	void DockWin::syncHotZoneEnabled()
+	{
+		if (!hotZone.alive()) return;
+		hotZone.setEnabled(!shouldHideNow());
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1974,13 +2008,15 @@ namespace zdock {
 		//   偷偷依赖了自动隐藏。现在两者彻底解耦：只要 hideOnFullscreen 开着，
 		//   自动隐藏关着也照样让位。
 
-		// ⚠ 热区**不销毁**。理由：
-		//   1) 它已经全透明、不抢焦点、不进 Alt+Tab，全屏应用看不出来；
+		// ⚠ 热区**不销毁**，但要让位时**停用命中**：
+		//   1) 它全透明、不抢焦点、不进 Alt+Tab，全屏应用看不出来；
 		//   2) 真按了它也没用 —— slideIn() / keepVisible() 都被
 		//      shouldHideNow() 挡住，全屏期间 dock 不会拱出来；
-		//   3) 留着它，自动化测试才有稳定的注入通道
-		//      （销毁了 hwnd 就失效，探针没法再驱动状态机）。
-		//   早期版本在全屏时销毁热区，实测发现会让探针的注入通道断掉。
+		//   3) 探针的注入通道靠的是 hwnd 存活，`setEnabled(false)` 只 Hide
+		//      不销毁，所以通道仍在；
+		//   4) 而"藏着但可命中"会**吃掉全屏游戏/视频贴边那几像素的点击**
+		//      （用户 2026-10-12 明确要求"全屏时不干扰"）。
+		syncHotZoneEnabled();
 		if (on) {
 			if (cfgHideOnFullscreen) slideOut();
 		}

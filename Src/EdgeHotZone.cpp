@@ -47,16 +47,45 @@ namespace zdock {
 			return false;
 		}
 
-		// 全透明（alpha=0）：用户完全看不见它，但它依然收得到鼠标消息。
-		// ⚠ 这里**不能**用 WS_EX_TRANSPARENT 或者 SetWindowRgn 挖空 ——
-		//   那样窗口就不参与命中测试了，热区也就不生效了。
-		SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+		// ⚠⚠ alpha 必须是**非零** —— 这是整个自动隐藏能不能唤出的关键。
+		//
+		// MSDN（WS_EX_LAYERED）：
+		//   "Hit testing of a layered window is based on the shape and transparency
+		//    of the window. This means that the areas of the window that are
+		//    color-keyed or **whose alpha value is zero will let the mouse messages
+		//    through**."
+		//
+		// 也就是说 **alpha=0 的热区收不到任何真实鼠标消息**（系统命中测试直接跳过它）。
+		// 早期这里传的是 0，注释还写着"依然收得到鼠标消息" —— 那是错的。
+		// 用户 2026-10-12 报"开启自动隐藏好像没效果"，根因就在这里。
+		//
+		// 为什么此前没测出来：探针是 `PostMessage(WM_MOUSEMOVE)` 直接投给热区 hwnd 的，
+		// **绕过了系统命中测试**，所以状态机在探针手里一切正常、真实鼠标却碰不到它。
+		// 机制实证见 `build-support/_probe_layered_hittest.py`（同一矩形：
+		// alpha=0 中心点命中到下层窗口；alpha=1 命中自己）。
+		//
+		// 取 1 而不是更大：1/255 ≈ 0.4% 不透明度，肉眼不可见，但**非零** → 参与命中测试。
+		// 这里**不能**改用 LWA_COLORKEY —— color-key 掉的区域同样会让鼠标穿透。
+		const BYTE kHitAlpha = 1;
+		SetLayeredWindowAttributes(hwnd, 0, kHitAlpha, LWA_ALPHA);
 
 		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 		entered = false;
+		enabled = true;
 		log(std::format(L"[hotzone] 已创建 ({},{})-({},{}) {}x{}",
 			screenRect.left, screenRect.top, screenRect.right, screenRect.bottom, w, h));
 		return true;
+	}
+
+	void EdgeHotZone::setEnabled(bool on)
+	{
+		if (!hwnd) { enabled = on; return; }
+		if (enabled == on) return;
+		enabled = on;
+		// 隐藏的窗口不参与命中测试 → 全屏应用期间不会吃它边缘的点击。
+		// hwnd 保留，探针的 PostMessage 注入通道不受影响。
+		ShowWindow(hwnd, on ? SW_SHOWNOACTIVATE : SW_HIDE);
+		log(on ? L"[hotzone] 已启用（参与命中）" : L"[hotzone] 已停用（不参与命中，避免挡住全屏应用）");
 	}
 
 	void EdgeHotZone::destroy()
@@ -72,11 +101,13 @@ namespace zdock {
 	void EdgeHotZone::moveTo(const RECT& screenRect)
 	{
 		if (!hwnd) return;
+		// ⚠ 标志必须跟随 enabled：常驻 SWP_SHOWWINDOW 会把"全屏期间被停用"的
+		//   热区重新显示出来，又把全屏应用的边缘点击吃回去。
 		SetWindowPos(hwnd, HWND_TOPMOST,
 			screenRect.left, screenRect.top,
 			screenRect.right - screenRect.left,
 			screenRect.bottom - screenRect.top,
-			SWP_NOACTIVATE | SWP_SHOWWINDOW);
+			SWP_NOACTIVATE | (enabled ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
 	}
 
 	LRESULT CALLBACK EdgeHotZone::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)

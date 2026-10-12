@@ -44,6 +44,21 @@ namespace zdock {
 		/// <summary>把热区移到新位置（面板宽度 / 显示器变化时调）。</summary>
 		void moveTo(const RECT& screenRect);
 
+		/// <summary>
+		/// 启用 / 停用热区的**命中**（不销毁窗口）。
+		///
+		/// 停用 = `ShowWindow(SW_HIDE)` —— 隐藏窗口不参与系统命中测试，因此
+		/// 全屏应用在前台时那条贴边热区**不会吃掉全屏游戏 / 视频边缘的鼠标点击**。
+		///
+		/// ⚠ 只隐藏、不销毁：hwnd 仍然有效，探针依旧可以 `PostMessage` 注入
+		///   （早期版本为了保注入通道而干脆在全屏时留着可命中，代价就是吃点击 ——
+		///   现在两者兼得）。
+		/// </summary>
+		void setEnabled(bool on);
+
+		/// <summary>当前是否参与命中。</summary>
+		bool enabledNow() const { return enabled; }
+
 		/// <summary>鼠标进入热区时回调（宿主据此滑入 dock）。</summary>
 		std::function<void()> onEnter;
 
@@ -57,6 +72,8 @@ namespace zdock {
 		HWND hwnd{ nullptr };
 		/// 已经给这个 hwnd 派发过 onEnter（避免鼠标在热区里移动时反复触发）
 		bool entered{ false };
+		/// 当前是否参与命中（见 setEnabled）
+		bool enabled{ false };
 	};
 
 } // namespace zdock

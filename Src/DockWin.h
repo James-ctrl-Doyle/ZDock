@@ -275,6 +275,12 @@ namespace zdock {
 		/// <summary>按当前状态重建 / 移动 / 销毁热区窗口。</summary>
 		void syncHotZone();
 
+		/// <summary>
+		/// 同步热区的"是否参与命中"：因全屏让位而收起时停用它，避免吃掉
+		/// 全屏应用的边缘点击。（只影响命中，不销毁窗口。）
+		/// </summary>
+		void syncHotZoneEnabled();
+
 		/// <summary>全屏状态变化时的处理（隐藏 / 恢复）。</summary>
 		void onFullscreenChanged(bool on);
 
@@ -327,6 +333,12 @@ namespace zdock {
 		enum class DockEdge { Bottom, Top, Left, Right };
 		/// <summary>沿停靠边的对齐。</summary>
 		enum class DockAlign { Start, Center, End };
+		/// <summary>
+		/// 自动隐藏热区沿停靠边的覆盖范围。
+		/// `Dock` = 只覆盖面板宽度；`Half` = 半屏居中（默认，与历史行为一致）；
+		/// `Full` = 整条边。
+		/// </summary>
+		enum class HotZoneSpan { Dock, Half, Full };
 
 		/// <summary>是不是"水平边"（bottom/top）—— 图标横向排列、沿边方向是 X。</summary>
 		bool horizontalEdge() const
@@ -415,6 +427,8 @@ namespace zdock {
 		int   cfgHideDelayMs{ 500 };
 		int   cfgSlideInMs{ 200 };
 		int   cfgSlideOutMs{ 300 };
+		int   cfgHotZoneThickness{ 4 };
+		HotZoneSpan cfgHotZoneSpan{ HotZoneSpan::Half };
 		bool  cfgHideOnFullscreen{ true };
 		bool  cfgReserveWorkArea{ false };
 

@@ -191,6 +191,7 @@ namespace zdock {
 		autoHideDelayMs = static_cast<int>(obj.GetNamedNumber(L"autoHideDelayMs", autoHideDelayMs));
 		slideInMs = static_cast<int>(obj.GetNamedNumber(L"slideInMs", slideInMs));
 		slideOutMs = static_cast<int>(obj.GetNamedNumber(L"slideOutMs", slideOutMs));
+		hotZoneThickness = static_cast<int>(obj.GetNamedNumber(L"hotZoneThickness", hotZoneThickness));
 
 		if (obj.HasKey(L"bgColor")) {
 			const auto s = std::wstring{ obj.GetNamedString(L"bgColor", L"") };
@@ -216,6 +217,7 @@ namespace zdock {
 			};
 		readEnum(L"dockEdge", dockEdge, { L"bottom", L"top", L"left", L"right" });
 		readEnum(L"dockAlign", dockAlign, { L"start", L"center", L"end" });
+		readEnum(L"hotZoneSpan", hotZoneSpan, { L"dock", L"half", L"full" });
 
 		dockOffset = static_cast<float>(obj.GetNamedNumber(L"dockOffset", dockOffset));
 		opacity = static_cast<float>(obj.GetNamedNumber(L"opacity", opacity));
@@ -293,11 +295,17 @@ namespace zdock {
 			log(std::format(L"[config] slideOutMs = {} 超出 [0, 3000]，回默认 300", slideOutMs));
 			slideOutMs = 300;
 		}
+		// 热区厚度：至少 1px（0 等于没有热区），上限 20px（再厚会明显占用屏幕边缘）
+		if (hotZoneThickness < 1 || hotZoneThickness > 20) {
+			log(std::format(L"[config] hotZoneThickness = {} 超出 [1, 20]，回默认 4", hotZoneThickness));
+			hotZoneThickness = 4;
+		}
 
-		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={} autoHide={} reserve={} hideFull={} edge={} align={} offset={:.0f} opacity={:.2f} monitor={}",
+		log(std::format(L"[config] 载入 ok：icon={:.0f} gap={:.0f} hover={:.2f} anim={}ms bottom={:.0f} 项数={} autoHide={} reserve={} hideFull={} edge={} align={} offset={:.0f} opacity={:.2f} monitor={} hotZone={}/{}px",
 			iconSize, iconGap, hoverScale, animMs, bottomMargin, items.size(),
 			autoHide ? 1 : 0, reserveWorkArea ? 1 : 0, hideOnFullscreen ? 1 : 0,
-			dockEdge, dockAlign, dockOffset, opacity, monitorIndex));
+			dockEdge, dockAlign, dockOffset, opacity, monitorIndex,
+			hotZoneSpan, hotZoneThickness));
 	}
 
 	std::string Config::toJson() const
@@ -320,6 +328,8 @@ namespace zdock {
 		root.SetNamedValue(L"autoHideDelayMs", JsonValue::CreateNumberValue(autoHideDelayMs));
 		root.SetNamedValue(L"slideInMs", JsonValue::CreateNumberValue(slideInMs));
 		root.SetNamedValue(L"slideOutMs", JsonValue::CreateNumberValue(slideOutMs));
+		root.SetNamedValue(L"hotZoneThickness", JsonValue::CreateNumberValue(hotZoneThickness));
+		root.SetNamedValue(L"hotZoneSpan", JsonValue::CreateStringValue(hotZoneSpan));
 		root.SetNamedValue(L"hideOnFullscreen", JsonValue::CreateBooleanValue(hideOnFullscreen));
 		root.SetNamedValue(L"reserveWorkArea", JsonValue::CreateBooleanValue(reserveWorkArea));
 

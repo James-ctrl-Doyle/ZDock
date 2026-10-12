@@ -451,6 +451,28 @@ namespace zdock {
 		y = toggleRow(y, L"自动隐藏",
 			[cfg] { return cfg->autoHide; },
 			[cfg](bool v) { cfg->autoHide = v; });
+		// 自动隐藏的细节参数。**常显**，不做"开关打开才出现"的动态显隐 ——
+		// 用户改完想立刻看效果，不该先去别处找开关。
+		y = sliderRow(y, L"收起延迟", 0.f, 2000.f, 50.f,
+			[cfg] { return static_cast<float>(cfg->autoHideDelayMs); },
+			[cfg](float v) { cfg->autoHideDelayMs = static_cast<int>(std::lround(v)); });
+		y = sliderRow(y, L"滑入时长", 0.f, 1000.f, 10.f,
+			[cfg] { return static_cast<float>(cfg->slideInMs); },
+			[cfg](float v) { cfg->slideInMs = static_cast<int>(std::lround(v)); });
+		y = sliderRow(y, L"滑出时长", 0.f, 1000.f, 10.f,
+			[cfg] { return static_cast<float>(cfg->slideOutMs); },
+			[cfg](float v) { cfg->slideOutMs = static_cast<int>(std::lround(v)); });
+		// 热区 = 贴边那条用来"唤出"的隐形窗口。太薄会很难碰到（高 DPI 屏尤其明显）。
+		y = sliderRow(y, L"热区厚度", 1.f, 20.f, 1.f,
+			[cfg] { return static_cast<float>(cfg->hotZoneThickness); },
+			[cfg](float v) { cfg->hotZoneThickness = static_cast<int>(std::lround(v)); });
+		y = choiceRow(y, L"热区范围",
+			{ {L"面板宽", [cfg] { return cfg->hotZoneSpan == L"dock"; }},
+			  {L"半屏",   [cfg] { return cfg->hotZoneSpan == L"half"; }},
+			  {L"整条边", [cfg] { return cfg->hotZoneSpan == L"full"; }} },
+			[cfg](int i) {
+				cfg->hotZoneSpan = (i == 0) ? L"dock" : (i == 2) ? L"full" : L"half";
+			});
 		y = toggleRow(y, L"全屏时让位",
 			[cfg] { return cfg->hideOnFullscreen; },
 			[cfg](bool v) { cfg->hideOnFullscreen = v; });

@@ -1,5 +1,59 @@
 # CHANGELOG
 
+## 0.1.18 · 完善自动隐藏（含一个"从来就没生效过"的硬伤）— 2026-10-12
+
+### 现象
+
+> "现在开启自动隐藏功能好像没效果"
+
+### 根因（硬伤）：热区窗口 alpha=0，鼠标消息全被穿透
+
+贴边热区用 `SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA)` 把 alpha 设成 **0**，
+而 MSDN 对 `WS_EX_LAYERED` 说得很清楚：
+
+> areas ... whose alpha value is **zero** will **let the mouse messages through**
+
+也就是说**热区从来收不到真实鼠标**，自动隐藏**从来没被真实鼠标唤出过**。
+代码里那句注释"全透明（alpha=0）……但它依然收得到鼠标消息"是错的。
+
+**为什么此前"验证通过"却没人发现**：探针是 `PostMessage(WM_MOUSEMOVE)` 直接投给热区
+hwnd 的 —— **绕过了系统命中测试**。状态机在探针手里一切正常，真实鼠标却碰不到它。
+（教训：命中类问题必须用 `WindowFromPoint` 这类**走系统命中测试**的手段验。）
+
+机制实证：新增 `build-support/_probe_layered_hittest.py`（自建同尺寸窗口，只读查询）——
+同一矩形 `alpha=0` 中心点命中到下层窗口、`alpha=1` 命中自己。
+
+### 修法
+
+* **`EdgeHotZone`：alpha 0 → 1**（1/255 ≈ 0.4% 不透明度，肉眼不可见但**非零** → 参与命中）。
+  不能改用 `LWA_COLORKEY` —— color-key 掉的区域同样穿透。
+
+### 顺带完善（用户 2026-10-12 指定的四条）
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 热区厚度 | 写死 3px | `hotZoneThickness`（1~20，默认 **4**），设置里可调 |
+| 热区范围 | 写死 `max(面板宽, 屏宽/2)` | `hotZoneSpan`：`dock` 面板宽 / `half` 半屏（默认）/ `full` 整条边 |
+| 启动状态 | 总是展开，要等鼠标扫过一次才收 | 开了自动隐藏 → **启动即收起**（直接落位，不播动画） |
+| 全屏时热区 | 仍然参与命中，会吃掉全屏应用边缘的点击 | 全屏让位期间**停用命中**（`SW_HIDE`，hwnd 保留 → 探针注入通道不断） |
+
+另外把 **收起延迟 / 滑入时长 / 滑出时长** 三项也放进设置界面（配置里本来就有，
+一直没暴露出来）；`hotZoneThickness` / `hotZoneSpan` 同步进 config.json。
+
+### 验证
+
+`build-support/_verify_autohide.py`：**19/19 PASS**（全程不移动鼠标、不抢焦点 ——
+命中用 `WindowFromPoint`，触发用 `PostMessage`，全屏用跟踪器注入通道 `WM_APP+100`）：
+
+* 启动即收起（`dock.top` = 屏幕底边）
+* **热区可被命中**（`WindowFromPoint(热区中心)` 返回热区自己）← 只改前必 FAIL
+* 热区收到鼠标 → dock 滑入；真实光标不在 dock 上 → 按配置时间自动收回
+* 全屏时热区 `IsWindowVisible=False`、该点不再命中、dock 让位；退出全屏全部回退
+* 厚度 12 → 热区高 12；范围三档实测 `242 < 960 < 1920`（面板宽/半屏/整边）
+* 新字段写出 config.json
+
+设置窗口回归 `_probe_settings.py` 17/17；界面实拍见 `build/_review/settings_bottom.png`。
+
 ## 0.1.17 · 修「Dock 上一个没有图标的『应用』」— 2026-10-12
 
 ### 现象
