@@ -57,7 +57,11 @@ namespace zdock {
 			surface = d2d->createDrawingSurface(win->compositor, static_cast<float>(pxW), static_cast<float>(pxH));
 			if (!surface) return;
 			auto brush = win->compositor.CreateSurfaceBrush(surface);
-			brush.Stretch(winrt::Windows::UI::Composition::CompositionStretch::Fill);
+			// ⚠⚠ 必须是 Uniform（**保持宽高比**），不能用 Fill。
+			//   Fill 会把方形位图**拉伸填满**目标框 —— 只要布局框不是 1:1，图标就会被
+			//   横向拉长（用户 2026-10-12 报的"图标撕裂/比别的宽一倍"就是这个表现）。
+			//   Uniform 会在比例不符时居中留白，代价小得多，而且**永远不会变形**。
+			brush.Stretch(winrt::Windows::UI::Composition::CompositionStretch::Uniform);
 			visual.Brush(brush);
 		}
 		else {

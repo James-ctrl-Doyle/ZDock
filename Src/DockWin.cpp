@@ -706,7 +706,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.22 · 修滑动被反复重启");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.23 · 修图标拉伸与隐藏位移");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1228,6 +1228,30 @@ namespace zdock {
 		setSize(winW, winH);
 		applyDockPlacement(0);
 
+		// ⚠⚠ 上面那句把窗口摆到了**展开位**，但此刻 dock 可能正处于隐藏态或滑动中 ——
+		//   必须按当前滑动状态把它摆回去，否则**隐藏的 dock 会被"上浮"回屏幕上**。
+		//   用户 2026-10-12 报的"切换应用时隐藏的 dock 栏上浮"就是这个链路：
+		//     切换应用 → 分组变化 → syncWithTracker → relayoutForItemCount → 摆到展开位。
+		//   ⚠ 这个修正原来只写在 relayoutForEnvironment() 里，syncWithTracker 那条路径漏了；
+		//     现在收口到这里，**所有**调用者（create / applyLiveConfig / syncWithTracker /
+		//     relayoutForEnvironment）都自动正确。
+		if (slideState == SlideState::Hidden
+			|| (slideState == SlideState::Sliding && slideTo > 0.f)) {
+			// 隐藏态（或正在往隐藏走）：直接落位到终点，避免半路跳变
+			killTimer(kTimerSlide);
+			slideTimerOn = false;
+			slideState = SlideState::Hidden;
+			slideT = 1.f;
+			applyDockPlacementHidden();
+		}
+		else if (slideState == SlideState::Sliding) {
+			// 正在滑入：落位到展开态终点
+			killTimer(kTimerSlide);
+			slideTimerOn = false;
+			slideState = SlideState::Shown;
+			slideT = 0.f;
+		}
+
 		layout();
 		updateHitRegion();
 		placeIndicators();
@@ -1279,6 +1303,34 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::placeIndicators()
 	{
+		// ---------------------------------------------------------------------
+		// 诊断：图标的**布局框**必须是 1:1。
+		// `IconNode` 用 `Stretch(Fill)` 把正方形位图（101x101）填进这个框 —— 框一旦
+		// 不是正方形，图标就会被**横向拉长**（用户 2026-10-12 报的"图标撕裂"就是
+		// 一个图标看起来比别的宽一倍）。正常路径下它应该恒等；一旦不等，
+		// 这条日志会点名是哪个图标、实际宽高多少 —— 直接指向 flex 布局的问题。
+		// ⚠ 只在"结果变化"时打一条汇总，避免每帧刷屏。
+		// ---------------------------------------------------------------------
+		{
+			static std::wstring lastBad;
+			std::wstring bad;
+			for (const auto& it : items) {
+				const auto* nd = it.node;
+				if (!nd || nd->w <= 0.f || nd->h <= 0.f) continue;
+				if (std::abs(nd->w - nd->h) > 1.0f) {
+					bad += std::format(L"「{}」{:.0f}x{:.0f} ", it.name, nd->w, nd->h);
+				}
+			}
+			if (bad != lastBad) {
+				lastBad = bad;
+				if (bad.empty()) {
+					log(L"[icon] 所有图标布局框都是 1:1");
+				}
+				else {
+					log(std::format(L"[icon] ⚠ 有图标布局框不是 1:1（会被横向拉伸变形）：{}", bad));
+				}
+			}
+		}
 		static const bool verbose = [] {
 			wchar_t buf[8]{};
 			return GetEnvironmentVariableW(L"ZDOCK_VERBOSE_IND", buf, 8) > 0;
@@ -1707,22 +1759,9 @@ namespace zdock {
 		//   如果此刻 dock 是隐藏的（自动隐藏 / 全屏让位），必须再推回屏幕外，
 		//   否则它会突然从屏幕底边冒出来。
 		relayoutForItemCount();
-		if (slideState == SlideState::Hidden
-			|| (slideState == SlideState::Sliding && slideTo > 0.f)) {
-			// 隐藏态（或正在往隐藏走）：直接落位到终点，避免半路跳变
-			killTimer(kTimerSlide);
-			slideTimerOn = false;
-			slideState = SlideState::Hidden;
-			slideT = 1.f;
-			applyDockPlacementHidden();
-		}
-		else if (slideState == SlideState::Sliding) {
-			// 正在滑入：落位到展开态终点
-			killTimer(kTimerSlide);
-			slideTimerOn = false;
-			slideState = SlideState::Shown;
-			slideT = 0.f;
-		}
+		// ⚠ 这里原来还抄了一份"把窗口摆回隐藏位 / 展开位"的逻辑，现在收口进
+		//   relayoutForItemCount() 内部了（那份漏给了 syncWithTracker，导致切换应用时
+		//   隐藏的 dock 会上浮）。别在这里再抄一遍。
 
 		syncHotZone();
 		// AppBar 的批准矩形是**屏幕坐标**的，监视器变了必须重报一次
