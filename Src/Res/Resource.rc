@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "James-ctrl-Doyle"
             VALUE "FileDescription", "ZDock"
-            VALUE "FileVersion", "0.1.23.0"
+            VALUE "FileVersion", "0.1.24.0"
             VALUE "InternalName", "ZDock"
             VALUE "LegalCopyright", "Copyright (C) 2026 James-ctrl-Doyle"
             VALUE "OriginalFilename", "ZDock.exe"
             VALUE "ProductName", "ZDock"
-            VALUE "ProductVersion", "0.1.23.0"
+            VALUE "ProductVersion", "0.1.24.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -584,26 +584,30 @@ namespace zdock {
 			return r;
 			};
 
-		RECT panelRect = toWinRect(panel->x, panel->y, panel->w, panel->h);
+		// ⚠⚠ region **必须留足余量**，不能按"当前 scale"精确算。
+		//
+		//   背景：`SetWindowRgn` 是**会裁剪绘制**的（region 决定系统允许在窗口内绘制的
+		//   区域）。而图标放大/缩小是 150ms 的 Composition 缓动动画 ——
+		//   **视觉滞后于 `node->scale()` 的返回值**：
+		//     · 旧代码用 `if (s <= 1.002f) continue;` 跳过没放大的图标，于是"缩小的那一瞬"
+		//       （scale() 已经回到 1.0、但视觉还在峰值大小）那块**完全不进 region**；
+		//     · 放大时虽然 region 先变大，但鼠标快速划过时 hover 会在动画没结束时反复变，
+		//       前一个还在放大的图标同样会掉出 region。
+		//   → 图标被 region 切掉一块（用户 2026-10-12 报的"快速滑动鼠标时图标不完整"，
+		//     截图里 Chrome 右上角缺了个口子）。
+		//
+		//   **与其追着 scale 跑，不如固定留出一个峰值图标的余量**：视觉永远不会被裁，
+		//   也不需要每帧重算 region。
+		//   ⚠ 多出来的空白没有副作用：那里的 hitTest 返回 HTTRANSPARENT，而
+		//     `WindowFromPoint` 会**跳过**这类区域（拿到的仍是下层窗口），
+		//     所以 hover / "鼠标还在不在 dock 上"的判定都不受影响。
+		const float margin = px(cfgIconBase) * (cfgHoverPeak - 1.f) + px(cfgIconGap);
+		RECT panelRect = toWinRect(panel->x - margin, panel->y - margin,
+			panel->w + margin * 2.f, panel->h + margin * 2.f);
 		HRGN region = CreateRectRgnIndirect(&panelRect);
 		if (!region) return;
-
-		for (const auto& item : items) {
-			auto* node = item.node;
-			if (!node || node->w <= 0.f) continue;
-			const float s = node->scale();
-			if (s <= 1.002f) continue;   // 没放大就不占额外区域
-			const float w = node->w * s;
-			const float h = node->h * s;
-			const float x = node->x + node->w * 0.5f - w * 0.5f;   // 以底边中点为锚
-			const float y = node->y + node->h - h;
-			RECT r = toWinRect(x, y, w, h);
-			HRGN one = CreateRectRgnIndirect(&r);
-			if (one) {
-				CombineRgn(region, region, one, RGN_OR);
-				DeleteObject(one);
-			}
-		}
+		// ⚠ 不再逐个图标做并集：余量已经把放大后的图标整个包住了，
+		//   而"逐图标精确并集"正是当年会导致动画中失配的做法。
 		// 成功后 region 所有权归系统，不要再 DeleteObject
 		SetWindowRgn(hwnd, region, TRUE);
 	}
@@ -706,7 +710,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.23 · 修图标拉伸与隐藏位移");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.24 · 修图标被裁切");
 
 		POINT pt{};
 		GetCursorPos(&pt);
