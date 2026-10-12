@@ -33,10 +33,16 @@ namespace zdock {
 		WindowTracker* g_trackerForHook = nullptr;
 
 		/// 取进程完整路径（带 pid→路径 缓存由调用方管）。
-		std::wstring queryProcessPath(DWORD pid)
+		/// 取进程映像路径。`denied` 置位表示 OpenProcess 被拒（ERROR_ACCESS_DENIED）
+		/// ——  这是"确定性读不到"（目标以更高完整性运行），重试也没有意义。
+		std::wstring queryProcessPath(DWORD pid, bool* denied = nullptr)
 		{
+			if (denied) *denied = false;
 			HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-			if (!h) return {};
+			if (!h) {
+				if (denied) *denied = (GetLastError() == ERROR_ACCESS_DENIED);
+				return {};
+			}
 			wchar_t buf[MAX_PATH * 2]{};
 			DWORD n = static_cast<DWORD>(std::size(buf));
 			const BOOL ok = QueryFullProcessImageNameW(h, 0, buf, &n);
@@ -338,15 +344,19 @@ namespace zdock {
 		GetWindowThreadProcessId(hwnd, &pid);
 		if (!pid) return;
 
-		// pid -> 路径缓存（任务书：别在每个事件里重查）
-		std::wstring exePath;
+		// pid -> 路径查询结果缓存（**失败也缓存** —— 这类窗口每次事件都会重来一遍，
+		// 不缓存就会对着一个确定读不到的进程反复 OpenProcess）。
+		ProcPathInfo pinfo;
+		bool pathJustQueried = false;
 		if (auto it = pidPathCache.find(pid); it != pidPathCache.end()) {
-			exePath = it->second;
+			pinfo = it->second;
 		}
 		else {
-			exePath = queryProcessPath(pid);
-			pidPathCache.emplace(pid, exePath);
+			pinfo.path = queryProcessPath(pid, &pinfo.denied);
+			pidPathCache.emplace(pid, pinfo);
+			pathJustQueried = true;
 		}
+		const std::wstring& exePath = pinfo.path;
 
 		// UWP 宿主窗口下钻
 		wchar_t cls[256]{};
@@ -360,6 +370,21 @@ namespace zdock {
 			if (HWND child = drillIntoFrame(hwnd, cls); child != hwnd) {
 				aumid = aumidOf(child);
 			}
+		}
+
+		// ------------------------------------------------------------------
+		// 收录门槛：进程路径"确定读不到"（权限被拒）又没有 AUMID 的窗口一律不收。
+		// 这类窗口无法归组：groupKeyOf 会退化成 hwnd: 分组、显示名变成默认的
+		// "应用"、并且拿不到图标 —— 在 dock 上就是一格空白。
+		// 实测案例：Parsec 的受保护辅助窗口（parsecd.exe / ParsecMinFrameRate5），
+		// 它以更高完整性运行，普通权限 OpenProcess 被拒（ERROR_ACCESS_DENIED）。
+		// ------------------------------------------------------------------
+		if (aumid.empty() && exePath.empty() && pinfo.denied) {
+			if (pathJustQueried) {
+				log(std::format(L"[track] 跳过无路径无 AUMID 的窗口 hwnd={} pid={} 标题={}",
+					reinterpret_cast<ULONG_PTR>(hwnd), pid, windowTitle(hwnd)));
+			}
+			return;
 		}
 
 		TrackedWindow tw;

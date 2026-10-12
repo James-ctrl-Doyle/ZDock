@@ -208,8 +208,14 @@ namespace zdock {
 		std::unordered_map<HWND, size_t> hwndToGroup;
 		/// hwnd -> 窗口记录（标题 / 最小化 / 最近使用）
 		std::unordered_map<HWND, TrackedWindow> windows;
-		/// pid -> exe 路径缓存（任务书：别在每个事件里重查）
-		std::unordered_map<DWORD, std::wstring> pidPathCache;
+		/// pid -> exe 路径查询结果缓存（任务书：别在每个事件里重查）。
+		/// `denied` 区分"确定读不到"（OpenProcess 被拒，重试没意义）与"其它失败"：
+		/// 只有确定性拒绝才会把窗口当成不可归组而过滤掉（见 addWindow 的收录门槛）。
+		struct ProcPathInfo {
+			std::wstring path;
+			bool denied{ false };
+		};
+		std::unordered_map<DWORD, ProcPathInfo> pidPathCache;
 
 		HWND foreground{ nullptr };
 		bool fullscreen{ false };

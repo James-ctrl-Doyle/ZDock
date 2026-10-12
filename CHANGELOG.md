@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## 0.1.17 · 修「Dock 上一个没有图标的『应用』」— 2026-10-12
+
+### 现象
+
+> "dock 栏上现在有个没有图标的应用是什么"
+
+dock 上多出一格：**没有图标、名字显示为"应用"**，点它也没有有意义的行为。
+
+### 根因：连自己是谁都问不出来的窗口被收进了 dock
+
+`WindowTracker::groupKeyOf()` 的分组键是三级降级：
+
+```
+有 AUMID  →  aumid:<AUMID>
+有 exe 路径 →  path:<小写路径>
+两者都没有 →  hwnd:<窗口句柄>      ← 退化档
+```
+
+退化到第三档时，显示名走 `addWindow()` 的最后一个 `else` 分支变成默认的
+**"应用"**（`WindowTracker.cpp`），图标自然也提取不到 —— 就是那格空白。
+
+实测命中者是 **Parsec**（云串流）的受保护辅助窗口：
+
+| 项 | 值 |
+|---|---|
+| 进程 | `parsecd.exe`（pid 5920） |
+| 标题 / 类名 | `ParsecMinFrameRate5` |
+| 拿不到路径的原因 | `OpenProcess` 返回 **ERROR_ACCESS_DENIED(5)** —— 它以更高完整性运行 |
+
+它 `IsWindowVisible` 为真、又没带 `WS_EX_TOOLWINDOW`、也没有 owner，所以恰好通过
+`shouldTrack()` 被收录，然后掉进退化档。
+
+### 修法：加一道收录门槛
+
+`WindowTracker::addWindow()` 在解析完 AUMID 之后、构造分组之前加判：
+
+> **进程路径"确定读不到"（`OpenProcess` 被拒）且又没有 AUMID → 直接不收录。**
+
+为什么要区分"被拒"与"其它失败"：只有 `ERROR_ACCESS_DENIED` 是**确定性**的
+（目标以更高完整性运行，普通权限永远读不到），重试没有意义；其它偶发失败仍按原
+行为收录，避免误伤正常应用。为此把 `pidPathCache` 的值从 `std::wstring` 换成
+`ProcPathInfo{ path, denied }`，`queryProcessPath()` 多带回一个 `denied` 出参。
+
+顺带：缓存**失败结果**（原本就缓存空串），避免这类窗口每次事件都对着一个确定读不到的
+进程反复 `OpenProcess`。
+
+### 怎么复现与验证的
+
+新增 `build-support/_probe_untracked_window.py`：只读枚举顶层窗口、复现
+`shouldTrack` + `groupKeyOf`，**不移动鼠标、不截桌面**，直接打印"会退化成 hwnd: 的窗口"
+（用 Toolhelp 快照拿映像名 —— 这条路径**不需要 OpenProcess**，权限被拒时照样读得到）。
+一跑就抓到 `parsecd.exe / ParsecMinFrameRate5`，与当时日志里的 `分组 key=hwnd:262728
+名称=应用` 精确对应。
+
+修复后用 `build-support/_verify_orphan_filter.py` 做 A/B（跑一次新 exe、约 5 秒自动退出，
+不预留工作区、不抢焦点）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| Dock 项数（用户配置） | 7 项（临时 2） | **6 项（临时 1）** |
+| `key=hwnd:` 退化分组 | 1 | **0** |
+| 日志 | （无） | `[track] 跳过无路径无 AUMID 的窗口 hwnd=262728 pid=5920 标题=ParsecMinFrameRate5` |
+
+⚠ 写这条探针的判据时踩过一次"验收工具的错伪装成程序的错"：初版断言"必须有 explorer
+成组"，但探针跑的是 `build/bin/` 那份**默认配置**（explorer/notepad/mspaint/cmd/powershell），
+且当时用户没开资源管理器窗口 —— 于是假 FAIL。判据已改成配置无关的
+"至少有 1 个 `path:`/`aumid:` 形式的分组"。
+
 ## 0.1.16 · 修「右键固定一个程序之后出现两个图标」— 2026-10-11
 
 ### 现象
