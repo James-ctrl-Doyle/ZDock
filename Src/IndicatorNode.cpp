@@ -20,9 +20,15 @@ namespace zdock {
 
 	void IndicatorNode::setOn(bool v)
 	{
-		if (on == v) return;
+		// ⚠⚠ 这里**不能**早退（`if (on == v) return;`）—— 踩过：
+		//   `visual.Opacity` 的默认值是 1（可见），而 `on` 的初值是 false。
+		//   早退会让"创建时那次 setOn(false)"什么都不做 → **指示器一直亮着**；
+		//   而且此后只要它没被设成 true 过，任何 setOn(false) 都会早退，
+		//   **永远关不掉**。用户 2026-10-12 报的"没开 TIM，指示器还亮着"就是这个
+		//   （固定项、没运行的应用全都在亮）。
+		//   代价只是一次 Composition 属性赋值，可以忽略。
 		on = v;
-		// ⚠ 隐藏用 visual 的 Opacity，不是把节点尺寸设 0 —— 后者会触发 relayout。
+		// 隐藏用 visual 的 Opacity，不是把节点尺寸设 0 —— 后者会触发 relayout。
 		visual.Opacity(on ? 1.f : 0.f);
 	}
 

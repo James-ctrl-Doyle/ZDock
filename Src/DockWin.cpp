@@ -522,12 +522,27 @@ namespace zdock {
 			log(std::format(L"[hover] apply index={} (prev={}) tick={}", index, hoverIndex, GetTickCount64()));
 		}
 
+		// ⚠⚠ 衰减距离必须用**图标在屏幕上的实际位置差**，不能用 items 的数组下标差。
+		//   数组顺序 ≠ 屏幕排列顺序：
+		//     · `pinRight` 的项（回收站）在 items 里紧跟配置顺序，却显示在最右边；
+		//     · 运行中的临时项被插在中间段；
+		//     · 三段容器（row / rowTemp / rowRight）各自定位。
+		//   用下标差会算出"回收站离 Chrome 只有一格"（d=1 → 放大到 1.26 倍），
+		//   于是悬停 Chrome 时最右边的回收站跟着一起放大 —— 用户 2026-10-12 报的
+		//   "多个图标一起放大"就是这个。
+		//   一格 = 图标边长 + 间距（逻辑值，经 px() 转物理，与 node->x/y 同口径）。
+		const float slot = px(cfgIconBase + cfgIconGap);
+		Ling::Node* ref = nullptr;
+		if (index >= 0 && static_cast<size_t>(index) < items.size()) ref = items[index].node;
+
 		for (size_t i = 0; i < items.size(); ++i) {
 			auto* node = items[i].node;
 			if (!node) continue;
 			float target = 1.f;
-			if (index >= 0) {
-				const float d = std::abs(static_cast<float>(i) - static_cast<float>(index));
+			if (ref && slot > 0.f) {
+				// 沿边方向取值：横向停靠看 x，纵向停靠看 y
+				const float delta = horizontalEdge() ? (node->x - ref->x) : (node->y - ref->y);
+				const float d = std::abs(delta) / slot;
 				target = 1.f + (cfgHoverPeak - 1.f) * std::exp(-(d / kHoverSigma) * (d / kHoverSigma));
 			}
 			node->animateScale(target, cfgAnimMs);
@@ -691,7 +706,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.19 · 修热区悬停");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.20 · 修鱼眼放大与指示器");
 
 		POINT pt{};
 		GetCursorPos(&pt);
