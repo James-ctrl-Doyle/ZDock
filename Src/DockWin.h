@@ -55,6 +55,26 @@ namespace zdock {
 		/// <summary>建窗口 + 内容。构造函数里不做（那时 dpi/尺寸还没配好）。</summary>
 		void create();
 
+		// -----------------------------------------------------------------------
+		// 高精度动画驱动（0.1.27）。
+		//
+		// ⚠ 为什么需要：滑动补间原来靠 `WM_TIMER`，而它的节拍被系统时钟钉在
+		//   **15.625ms**，实测天花板就是 **~64fps**（请求 10ms 也只给 1 拍）。
+		//   要跑到 ~120fps 必须换驱动器 —— 由 main.cpp 用 `SetWaitableTimer(8ms)`
+		//   + `MsgWaitForMultipleObjects` 在消息循环里驱动。
+		//
+		// ⚠⚠ **只在滑动期间启用**：空闲时每 8ms 醒一次会把 CPU 占用顶上去
+		//   （本项目红线是"空闲 CPU 接近 0"）。所以由滑动本身开关这个回调。
+		// -----------------------------------------------------------------------
+		/// <summary>
+		/// 由 main 注入：`onAnimationTickNeeded(true/false)` 用于启停那个 8ms 高精度定时器。
+		/// 没注入时自动退回 `WM_TIMER`（见 tickSlide 里的兜底）。
+		/// </summary>
+		std::function<void(bool)> onAnimationTickNeeded;
+
+		/// <summary>main 的消息循环每 8ms 调一次；只在滑动期间真正干活。</summary>
+		void animationTick();
+
 	protected:
 		void onCreated() override;
 		LRESULT onHitTest(const POINT pos) override;
@@ -275,6 +295,10 @@ namespace zdock {
 
 		/// <summary>滑动动画的定时器回调（补间）。</summary>
 		void tickSlide();
+
+		/// <summary>启停高精度动画驱动（带配平，只在状态真的变化时通知 main）。</summary>
+		void setAnimTick(bool on);
+		bool animTickOn{ false };
 
 		/// <summary>
 		/// 当前是否应该隐藏（自动隐藏开着 且 （全屏应用在前台 且 hideOnFullscreen））。

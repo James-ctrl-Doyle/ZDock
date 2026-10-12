@@ -731,7 +731,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.26 · 修切换应用时的闪动");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.27 · 高精度驱动 120fps");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1267,6 +1267,7 @@ namespace zdock {
 			// 隐藏态（或正在往隐藏走）：落位到隐藏终点，避免半路跳变
 			killTimer(kTimerSlide);
 			slideTimerOn = false;
+			setAnimTick(false);
 			slideState = SlideState::Hidden;
 			slideT = 1.f;
 			applyDockPlacementHidden();
@@ -2048,7 +2049,15 @@ namespace zdock {
 		slideDurMs = cfgSlideInMs;
 		slideStartTick = GetTickCount64();
 		slideState = SlideState::Sliding;
-		if (!slideTimerOn) { slideTimerOn = true; setTimer(kSlideTimerMs, kTimerSlide); }
+		setAnimTick(true);
+		// ⚠⚠ 有高精度驱动时**不要**再开 `WM_TIMER` —— 两者交错会把实际帧率推到 ~170fps
+		//   （实测 6.0ms/帧），纯粹浪费 CPU，也超出了约定的 ~120fps。
+		//   只有在**没有**注入驱动器时（onAnimationTickNeeded 为空，例如探针/裁剪版）
+		//   才退回 `WM_TIMER` 那条老路。
+		if (!onAnimationTickNeeded && !slideTimerOn) {
+			slideTimerOn = true;
+			setTimer(kSlideTimerMs, kTimerSlide);
+		}
 		log(std::format(L"[dock] 滑入开始（{:.0f}px / {}ms）", slideFrom, slideDurMs));
 	}
 
@@ -2075,7 +2084,15 @@ namespace zdock {
 		slideDurMs = cfgSlideOutMs;
 		slideStartTick = GetTickCount64();
 		slideState = SlideState::Sliding;
-		if (!slideTimerOn) { slideTimerOn = true; setTimer(kSlideTimerMs, kTimerSlide); }
+		setAnimTick(true);
+		// ⚠⚠ 有高精度驱动时**不要**再开 `WM_TIMER` —— 两者交错会把实际帧率推到 ~170fps
+		//   （实测 6.0ms/帧），纯粹浪费 CPU，也超出了约定的 ~120fps。
+		//   只有在**没有**注入驱动器时（onAnimationTickNeeded 为空，例如探针/裁剪版）
+		//   才退回 `WM_TIMER` 那条老路。
+		if (!onAnimationTickNeeded && !slideTimerOn) {
+			slideTimerOn = true;
+			setTimer(kSlideTimerMs, kTimerSlide);
+		}
 		log(std::format(L"[dock] 滑出开始（{:.0f} → {:.0f}px / {}ms）", slideFrom, slideTo, slideDurMs));
 	}
 
@@ -2089,10 +2106,37 @@ namespace zdock {
 	//   `WM_TIMER` 会把 elapse 向上对齐到 15.625ms 的整数倍，写 16 会掉到 2 拍 = 31ms
 	//   （≈32fps），写 10 才能拿到 1 拍 = 15.6ms（≈64fps）。这是"滑动发卡"的真根因。
 	// ---------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------
+	// 高精度动画驱动的开关（0.1.27）。
+	//
+	// ⚠ 滑动补间原来靠 `setTimer(10)` + `WM_TIMER`，而 `WM_TIMER` 的节拍被系统时钟
+	//   钉在 **15.625ms**（实测天花板 ~64fps）。要跑 ~120fps 必须换驱动器 ——
+	//   main.cpp 用 `SetWaitableTimer(8ms)` + `MsgWaitForMultipleObjects` 驱动
+	//   `animationTick()`。这里只负责"滑动期间开、结束立刻关"：
+	//   空闲时每 8ms 醒一次会把 CPU 占用顶上去（本项目红线是空闲 CPU 接近 0）。
+	// ---------------------------------------------------------------------------
+	void DockWin::setAnimTick(bool on)
+	{
+		if (animTickOn == on) return;
+		animTickOn = on;
+		if (onAnimationTickNeeded) onAnimationTickNeeded(on);
+	}
+
+	// main 的消息循环按 8ms 周期调用；只有滑动期间才真的做事。
+	void DockWin::animationTick()
+	{
+		if (slideState != SlideState::Sliding) {
+			setAnimTick(false);
+			return;
+		}
+		tickSlide();
+	}
+
 	void DockWin::tickSlide()
 	{
 		if (!hwnd || slideState != SlideState::Sliding) {
 			if (slideTimerOn) { killTimer(kTimerSlide); slideTimerOn = false; }
+			setAnimTick(false);
 			return;
 		}
 
@@ -2164,6 +2208,7 @@ namespace zdock {
 		if (lin >= 1.f) {
 			killTimer(kTimerSlide);
 			slideTimerOn = false;
+			setAnimTick(false);
 			slideT = (slideTo > 0.f) ? 1.f : 0.f;
 			slideState = (slideTo > 0.f && std::abs(slideTo) > 1.f) ? SlideState::Hidden : SlideState::Shown;
 			log(std::format(L"[dock] 滑动结束 -> {}", slideState == SlideState::Hidden ? L"隐藏" : L"展开"));

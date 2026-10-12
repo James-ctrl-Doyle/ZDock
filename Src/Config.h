@@ -81,7 +81,7 @@ namespace zdock {
 		///   永远走不完，见 DockWin::slideIn 的注释），修完之后 200ms 是**真实**的 200ms。
 		///   调 120 是在"真实时长"基础上的进一步加快。
 		/// </summary>
-		int  slideInMs{ 120 };
+		int  slideInMs{ 150 };
 		/// <summary>滑出动画时长（毫秒）。任务书 §3 定 300。</summary>
 		int  slideOutMs{ 300 };
 		/// <summary>
