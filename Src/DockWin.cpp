@@ -731,7 +731,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.25 · 修补自动隐藏漏检");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.26 · 修切换应用时的闪动");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1251,30 +1251,35 @@ namespace zdock {
 		// 窗口尺寸变化的**同时**要把位置摆回"贴边 + 按对齐居中"，
 		// 否则窗口会以左下角为锚、越走越偏。
 		setSize(winW, winH);
-		applyDockPlacement(0);
 
-		// ⚠⚠ 上面那句把窗口摆到了**展开位**，但此刻 dock 可能正处于隐藏态或滑动中 ——
-		//   必须按当前滑动状态把它摆回去，否则**隐藏的 dock 会被"上浮"回屏幕上**。
-		//   用户 2026-10-12 报的"切换应用时隐藏的 dock 栏上浮"就是这个链路：
-		//     切换应用 → 分组变化 → syncWithTracker → relayoutForItemCount → 摆到展开位。
-		//   ⚠ 这个修正原来只写在 relayoutForEnvironment() 里，syncWithTracker 那条路径漏了；
-		//     现在收口到这里，**所有**调用者（create / applyLiveConfig / syncWithTracker /
-		//     relayoutForEnvironment）都自动正确。
-		if (slideState == SlideState::Hidden
-			|| (slideState == SlideState::Sliding && slideTo > 0.f)) {
-			// 隐藏态（或正在往隐藏走）：直接落位到终点，避免半路跳变
+		// ⚠⚠ **只摆一次**，绝不能"先摆展开位、再摆回隐藏位"。
+		//
+		//   踩过（2026-10-13 用户报"切换应用时 dock 弹出然后马上又隐藏"，
+		//   复现步骤：点一下资源管理器窗口 → 分组变化 → 重排）：
+		//     旧写法是先 `applyDockPlacement(0)`（展开位）、再 `applyDockPlacementHidden()`。
+		//     那是**两次 SetWindowPos**，中间那一帧的"展开位"会被 DWM 合成出来 ——
+		//     用户看到的就是"弹一下又缩回去"。而窗口位置这种几何状态**没有中间态可接受**。
+		//
+		//   所以：**先按当前滑动状态算出该在哪，然后一次摆到位**。
+		const bool wantHidden = (slideState == SlideState::Hidden
+			|| (slideState == SlideState::Sliding && slideTo > 0.f));
+		if (wantHidden) {
+			// 隐藏态（或正在往隐藏走）：落位到隐藏终点，避免半路跳变
 			killTimer(kTimerSlide);
 			slideTimerOn = false;
 			slideState = SlideState::Hidden;
 			slideT = 1.f;
 			applyDockPlacementHidden();
 		}
-		else if (slideState == SlideState::Sliding) {
-			// 正在滑入：落位到展开态终点
-			killTimer(kTimerSlide);
-			slideTimerOn = false;
-			slideState = SlideState::Shown;
-			slideT = 0.f;
+		else {
+			// 展开态 / 正在滑入：落位到展开位
+			if (slideState == SlideState::Sliding) {
+				killTimer(kTimerSlide);
+				slideTimerOn = false;
+				slideState = SlideState::Shown;
+				slideT = 0.f;
+			}
+			applyDockPlacement(0);
 		}
 
 		layout();
