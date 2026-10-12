@@ -706,7 +706,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.21 · 修滑动卡顿（匀速+帧率）");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.22 · 修滑动被反复重启");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1954,6 +1954,13 @@ namespace zdock {
 		//   dock 会从全屏画面底下拱出来。
 		if (shouldHideNow()) return;
 		if (slideState == SlideState::Shown && slideT <= 0.f) return;
+		// ⚠⚠ 已经在往"展开"方向滑了 → **别重启动画**。
+		//   滑动中每收到一次鼠标事件都会走到这里（refreshHoverFromCursor → keepVisible → slideIn），
+		//   重启会把 slideStartTick 归零、重新计满一遍时长 —— 结果是**动画永远走不完**：
+		//   用户 2026-10-12 报的"滑上来还是好慢"，日志里是一次滑入被触发上百次、
+		//   而"滑动结束"一条都没有（149 : 0）。
+		//   反向（正在滑出时又要滑入）**必须**继续往下走，所以判据要看 slideTo 的方向。
+		if (slideState == SlideState::Sliding && slideTo <= 0.f) return;
 
 		// 从当前实际位置开始补间（避免滑动中途反向时跳变）
 		slideFrom = static_cast<float>(curSlideOffset());
@@ -1976,6 +1983,10 @@ namespace zdock {
 		// ⚠ 同样不检查 cfgAutoHide（理由见 slideIn）。
 		if (!hwnd) return;
 		if (slideState == SlideState::Hidden && slideT >= 1.f) return;
+		// ⚠⚠ 同理（见 slideIn）：已经在往"隐藏"方向滑了就别重启，否则同样永远走不完。
+		//   实测这条触发得最狠 —— 隐藏态下 scheduleHide 的定时器到期会反复调 slideOut，
+		//   每次都以 `184 → 184px` 重启，日志里每 200ms 刷一条，滑动永不结束。
+		if (slideState == SlideState::Sliding && slideTo > 0.f) return;
 
 		slideFrom = static_cast<float>(curSlideOffset());
 		// 目标：整个窗口滑到停靠边之外（同样锚监视器，不受工作区影响）

@@ -74,8 +74,14 @@ namespace zdock {
 		bool autoHide{ false };
 		/// <summary>鼠标离开到开始滑出的延迟（毫秒）。任务书 §5 定 500。</summary>
 		int  autoHideDelayMs{ 500 };
-		/// <summary>滑入动画时长（毫秒）。任务书 §3 定 200。</summary>
-		int  slideInMs{ 200 };
+		/// <summary>
+		/// 滑入动画时长（毫秒）。任务书 §3 原本定 200。
+		/// ⚠ 2026-10-12 用户反馈"滑上来还是好慢" → 调到 **120**。
+		///   注意：他当时感受到的"慢"其实主要是另一个 bug（滑动被每个鼠标事件反复重启、
+		///   永远走不完，见 DockWin::slideIn 的注释），修完之后 200ms 是**真实**的 200ms。
+		///   调 120 是在"真实时长"基础上的进一步加快。
+		/// </summary>
+		int  slideInMs{ 120 };
 		/// <summary>滑出动画时长（毫秒）。任务书 §3 定 300。</summary>
 		int  slideOutMs{ 300 };
 		/// <summary>
