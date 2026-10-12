@@ -71,6 +71,25 @@ namespace zdock {
 		static constexpr int   kTimerHover = 1;     // 判定"鼠标已移出"的兜底定时器
 		static constexpr int   kTimerAutoHide = 2;  // 自动隐藏延迟 / 滑动补间（阶段四）
 		static constexpr int   kTimerSlide = 3;     // 滑动动画补间（阶段四）
+
+		/// <summary>
+		/// 滑动补间的定时器间隔（毫秒）。
+		///
+		/// ⚠⚠ **必须写 10，不能写 16** —— 这是 2026-10-12 实测出来的坑：
+		///   `WM_TIMER` 的 elapse 会被**向上对齐到系统时钟节拍的整数倍**（默认 15.625ms）：
+		///     请求 10ms → 实测 15.6ms（1 拍，≈64fps）✓
+		///     请求 15ms → 实测 16.3ms（1 拍）✓
+		///     请求 16ms → 实测 **28.0ms（2 拍！≈36fps）** ✗  ← 原来就是写 16
+		///     请求 20/25/31ms → 实测 31.4 / 32.3 / 33.4ms（都是 2 拍）
+		///     请求 32ms → 实测 46.5ms（3 拍）
+		///   "想跑 60fps 就写 16" 是错的：16 恰好跨过一拍，直接掉到 32fps。
+		///   ⚠ 改成 10 之后**多数帧**是 15.6ms（≈64fps），但**偶发**仍会掉一次 2 拍
+		///   （31ms）—— 那是消息泵被系统调度挤了一下的抖动，靠 elapse 解决不了。
+		///   实测平均从 24~29ms（≈41fps）降到 15.6~17ms（≈60fps），
+		///   位移步长的变异系数从 0.29 降到 0.03~0.05（明显更匀）。
+		///   机制实证见 `build-support/_probe_timer_resolution.py`（空窗口扫 elapse）。
+		/// </summary>
+		static constexpr int   kSlideTimerMs = 10;
 		static constexpr int   kTimerRelayout = 4;  // 显示环境变化后的重排（延迟一拍，见下）
 		static constexpr int   kMenuExit = 101;
 		static constexpr int   kMenuOpen = 102;

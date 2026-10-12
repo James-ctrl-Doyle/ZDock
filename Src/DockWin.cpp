@@ -706,7 +706,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.20 · 修鱼眼放大与指示器");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.21 · 修滑动卡顿（匀速+帧率）");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1962,7 +1962,7 @@ namespace zdock {
 		slideDurMs = cfgSlideInMs;
 		slideStartTick = GetTickCount64();
 		slideState = SlideState::Sliding;
-		if (!slideTimerOn) { slideTimerOn = true; setTimer(16, kTimerSlide); }
+		if (!slideTimerOn) { slideTimerOn = true; setTimer(kSlideTimerMs, kTimerSlide); }
 		log(std::format(L"[dock] 滑入开始（{:.0f}px / {}ms）", slideFrom, slideDurMs));
 	}
 
@@ -1985,16 +1985,19 @@ namespace zdock {
 		slideDurMs = cfgSlideOutMs;
 		slideStartTick = GetTickCount64();
 		slideState = SlideState::Sliding;
-		if (!slideTimerOn) { slideTimerOn = true; setTimer(16, kTimerSlide); }
+		if (!slideTimerOn) { slideTimerOn = true; setTimer(kSlideTimerMs, kTimerSlide); }
 		log(std::format(L"[dock] 滑出开始（{:.0f} → {:.0f}px / {}ms）", slideFrom, slideTo, slideDurMs));
 	}
 
 	// ---------------------------------------------------------------------------
-	// 滑动补间。16ms 一帧（约 60fps）。
+	// 滑动补间。
 	//
 	// ⚠ 用**定时器补间 + SetWindowPos**，不用 Composition 动画：
 	//   Composition 动的是节点，动不了窗口在屏幕上的位置。而"滑出屏幕"必须动窗口。
-	//   这是任务书 §3 允许的实现 —— 它只约束时长与缓动（200/300ms ease-out）。
+	//
+	// ⚠⚠ 定时器间隔是 `kSlideTimerMs = 10`（**不是 16**，见 DockWin.h 里的长注释）：
+	//   `WM_TIMER` 会把 elapse 向上对齐到 15.625ms 的整数倍，写 16 会掉到 2 拍 = 31ms
+	//   （≈32fps），写 10 才能拿到 1 拍 = 15.6ms（≈64fps）。这是"滑动发卡"的真根因。
 	// ---------------------------------------------------------------------------
 	void DockWin::tickSlide()
 	{
@@ -2003,20 +2006,69 @@ namespace zdock {
 			return;
 		}
 
-		// ease-out cubic：1-(1-t)^3
+		// ---- 滑动性能诊断（ZDOCK_VERBOSE_SLIDE=1）----
+		// 量化"卡不卡"：记每帧实际间隔与位置。
+		// ⚠ 2026-10-12 就是靠它定位到"滑动发卡"的真根因：`WM_TIMER` 的 elapse 会被
+		//   **向上对齐到系统时钟节拍（默认 15.625ms）的整数倍** —— 原来写 16ms 恰好跨过
+		//   一拍，实际掉到 2 拍 = 31ms（≈32fps，肉眼就是"卡"）。改成 10ms 后稳定拿到
+		//   15.6ms（≈64fps），步长变异系数从 0.29 降到 0.03。
+		//   详见 DockWin.h 里 `kSlideTimerMs` 的注释，机制实证见 `_probe_timer_resolution.py`。
+		static const bool verboseSlide = [] {
+			wchar_t buf[8]{};
+			return GetEnvironmentVariableW(L"ZDOCK_VERBOSE_SLIDE", buf, 8) > 0;
+			}();
+		static ULONGLONG s_lastTick = 0;
+		static int s_frames = 0;
+		static ULONGLONG s_maxGap = 0;
+		static float s_offsets[64]{};   // 每帧的位移，用来核对"匀速"（应等步长递增）
+		static int s_offsetN = 0;
+		static double s_moveTotal = 0.0, s_moveMax = 0.0;
+		static const double s_qpcFreq = [] {
+			LARGE_INTEGER f{};
+			QueryPerformanceFrequency(&f);
+			return (f.QuadPart > 0) ? static_cast<double>(f.QuadPart) : 1.0;
+			}();
+		// 对照实验：跳过"移动窗口"这一步（ZDOCK_SLIDE_NO_MOVE=1）。
+		// 用来分辨"每帧 24ms"到底花在 SetWindowPos 上，还是在定时器 / 消息循环本身 ——
+		// 这决定了优化方向是"换动画载体"还是"提高定时精度"。
+		static const bool s_skipMove = [] {
+			wchar_t buf[8]{};
+			return GetEnvironmentVariableW(L"ZDOCK_SLIDE_NO_MOVE", buf, 8) > 0;
+			}();
+
+		const ULONGLONG nowTick = GetTickCount64();
+		if (verboseSlide) {
+			if (s_lastTick) s_maxGap = (std::max)(s_maxGap, nowTick - s_lastTick);
+			s_lastTick = nowTick;
+			++s_frames;
+		}
+
+		// 进度 0..1。
+		// ⚠ **匀速**（linear）—— 用户 2026-10-12 要求"改成匀速平移"。
+		//   原来是 ease-out cubic（`1-(1-t)^3`）：起步快、末段几乎不动，
+		//   配合 32fps 的跳帧观感上末段像在"挪"。现在 e = lin 直接线性推进。
 		float lin = (slideDurMs > 0)
-			? static_cast<float>(GetTickCount64() - slideStartTick) / static_cast<float>(slideDurMs)
+			? static_cast<float>(nowTick - slideStartTick) / static_cast<float>(slideDurMs)
 			: 1.f;
 		if (lin > 1.f) lin = 1.f;
-		const float e = 1.f - std::pow(1.f - lin, 3.f);
+		const float e = lin;
 
 		const float dist = slideFrom + (slideTo - slideFrom) * e;
+		if (verboseSlide && s_offsetN < 64) s_offsets[s_offsetN++] = dist;
 		{
 			// 位移沿**滑出方向**施加（bottom=+Y / top=−Y / left=−X / right=+X）
 			int dx = 0, dy = 0;
 			slideDir(dx, dy);
 			const int d = static_cast<int>(std::lround(dist));
-			setPosition(shownOrigin.x + dx * d, shownOrigin.y + dy * d);
+			LARGE_INTEGER q0{}, q1{};
+			QueryPerformanceCounter(&q0);
+			if (!s_skipMove) setPosition(shownOrigin.x + dx * d, shownOrigin.y + dy * d);
+			QueryPerformanceCounter(&q1);
+			if (verboseSlide) {
+				const double ms = static_cast<double>(q1.QuadPart - q0.QuadPart) * 1000.0 / s_qpcFreq;
+				s_moveTotal += ms;
+				s_moveMax = (std::max)(s_moveMax, ms);
+			}
 		}
 
 		if (lin >= 1.f) {
@@ -2025,6 +2077,26 @@ namespace zdock {
 			slideT = (slideTo > 0.f) ? 1.f : 0.f;
 			slideState = (slideTo > 0.f && std::abs(slideTo) > 1.f) ? SlideState::Hidden : SlideState::Shown;
 			log(std::format(L"[dock] 滑动结束 -> {}", slideState == SlideState::Hidden ? L"隐藏" : L"展开"));
+			if (verboseSlide && s_frames > 0) {
+				const ULONGLONG total = nowTick - slideStartTick;
+				std::wstring seq;
+				for (int i = 0; i < s_offsetN; ++i) {
+					if (!seq.empty()) seq += L",";
+					seq += std::format(L"{:.0f}", s_offsets[i]);
+				}
+				log(std::format(L"[slide] 汇总：{} 帧 / 实际 {}ms / 目标 {}ms / 最大帧间隔 {}ms / 平均 {:.1f}ms | 位移序列 {}",
+					s_frames, total, slideDurMs, s_maxGap,
+					static_cast<double>(total) / s_frames, seq));
+				log(std::format(L"[slide] 移动窗口耗时：平均 {:.2f}ms / 最大 {:.2f}ms（{}）",
+					s_moveTotal / s_frames, s_moveMax,
+					s_skipMove ? L"本次跳过移动" : L"含移动"));
+				s_lastTick = 0;
+				s_frames = 0;
+				s_maxGap = 0;
+				s_offsetN = 0;
+				s_moveTotal = 0.0;
+				s_moveMax = 0.0;
+			}
 			// ⚠ 滑入结束后必须补一次"该不该收"的判断。
 			//   触发滑入的来源不一定伴随鼠标在 dock 上（典型：全屏应用退出时
 			//   无条件 slideIn）。不补这一下，dock 会一直停着不走，直到下次
