@@ -129,14 +129,26 @@ namespace zdock {
 			//   WM_MOUSEMOVE，每次都回调会把 dock 的滑入动画反复重启。
 			if (!self->entered) {
 				self->entered = true;
+				// ⚠⚠ 必须注册 TME_LEAVE，否则**永远收不到 WM_MOUSELEAVE**：
+				//   Win32 里 WM_MOUSELEAVE 不是自动来的，要先 TrackMouseEvent 订阅，
+				//   而且它**是一次性**的（收到 LEAVE 后要在下次 MOUSEMOVE 时重新订阅）。
+				//   早期这里没订阅 → `entered` 永远是 true → 热区**只在第一次有效**，
+				//   用户之后再碰停靠边完全没反应（用户 2026-10-12 报的"贴底边 dock 不升起"，
+				//   其中"之后再也不响应"这一半就是这个）。
+				TRACKMOUSEEVENT tme{};
+				tme.cbSize = sizeof(tme);
+				tme.dwFlags = TME_LEAVE;
+				tme.hwndTrack = hwnd;
+				TrackMouseEvent(&tme);
 				self->log(L"[hotzone] 鼠标进入，触发滑入");
 				if (self->onEnter) self->onEnter();
 			}
 			return 0;
 
 		case WM_MOUSELEAVE:
-			// 离开后允许下一次进入再触发
+			// 离开后允许下一次进入再触发（并通知宿主开始延迟收起）
 			self->entered = false;
+			if (self->onLeave) self->onLeave();
 			return 0;
 
 		case WM_NCHITTEST:

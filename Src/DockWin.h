@@ -272,6 +272,16 @@ namespace zdock {
 		/// <summary>热区窗口该在的屏幕矩形（物理像素）。</summary>
 		RECT hotZoneRect() const;
 
+		/// <summary>
+		/// 某个屏幕坐标是否落在"贴边热区"上（自动隐藏没开 / 热区不存在时恒 false）。
+		///
+		/// ⚠ **所有"鼠标还在不在 dock 上"的判定都必须带上这一条**：
+		///   热区是独立窗口且压在最上层（TOPMOST），鼠标停在停靠边唤出 dock 时
+		///   `WindowFromPoint` 命中的是**热区**、不是 dock 主窗口。只看
+		///   `under == hwnd` 会把这种情况判成"鼠标已离开"，dock 刚升起来就被收回去。
+		/// </summary>
+		bool cursorOnHotZone(const POINT& pt) const;
+
 		/// <summary>按当前状态重建 / 移动 / 销毁热区窗口。</summary>
 		void syncHotZone();
 

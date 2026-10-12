@@ -480,18 +480,24 @@ namespace zdock {
 		//   halo 那圈透明区不算"在 dock 上"。
 		HWND under = WindowFromPoint(pt);
 		const bool overDock = (under == hwnd);
+		// ⚠⚠ 热区也算"贴着 dock"（理由见 `cursorOnHotZone` 的说明）：热区是独立窗口
+		//   且压在最上层，鼠标停在停靠边唤出 dock 时 WindowFromPoint 命中的是**热区**
+		//   而不是 dock。只看 overDock 会把它误判成"鼠标已离开" → dock 刚升起 500ms
+		//   就被 scheduleHide 收回去（用户 2026-10-12 报的"贴底边 dock 不升起"，
+		//   日志里其实是"滑入 200ms 后紧跟滑出"）。`cursorOverDock()` 早就有这条判定，
+		//   这里漏了 —— 两处口径必须一致，所以现在共用 `cursorOnHotZone()`。
+		const bool overHotZone = cursorOnHotZone(pt);
 		if (overDock) {
 			POINT client = pt;
 			ScreenToClient(hwnd, &client);
 			idx = indexAtHover(client);
 		}
-
 		// 阶段四：自动隐藏的"离开"判定就挂在这里。
 		// ⚠ 这里是**事件驱动 + 单次查询**（由 WM_NCHITTEST / 定时器兜底触发），
 		//   不是轮询：我们只是借"系统刚好在问命中"这个时机顺便看了一眼光标。
 		//   任务书红线 4 的例外条款明确允许"自动隐藏延迟这类自身 UI 状态"。 
 		if (cfgAutoHide && slideState != SlideState::Hidden) {
-			if (overDock || menuSessions > 0) keepVisible();
+			if (overDock || overHotZone || menuSessions > 0) keepVisible();
 			else scheduleHide();
 		}
 
@@ -685,7 +691,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.18 · 自动隐藏完善");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.19 · 修热区悬停");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1718,6 +1724,14 @@ namespace zdock {
 			keepVisible();
 			slideIn();
 			};
+		hotZone.onLeave = [this] {
+			// 鼠标离开热区 → 开始"离开后延迟收起"的计时。
+			// ⚠ 不能省这一条：光标**直接从热区移开**（不经过 dock 面板）时，dock
+			//   收不到任何鼠标消息 —— 没有它，dock 一旦被热区唤出就会一直赖着展开。
+			//   到期后 onTimer(kTimerAutoHide) 还会再确认一次（光标若在 dock 上则
+			//   refreshHoverFromCursor 会 keepVisible，不会误收）。
+			scheduleHide();
+			};
 		hotZone.onLog = [](const std::wstring& s) { log(s); };
 
 		if (cfgAutoHide) {
@@ -1864,12 +1878,24 @@ namespace zdock {
 		if (!GetCursorPos(&pt)) return false;
 		if (WindowFromPoint(pt) == hwnd) return true;
 
-		// ⚠ 热区是**另一个窗口**（贴边的 3px 细窗，见 EdgeHotZone.h）。
-		//   从热区唤出 dock 时，光标还压在热区上、并不在 dock 上 ——
-		//   如果只看 hwnd，`tickSlide()` 结尾那次"该不该收"的判定会认为
-		//   "鼠标不在 dock 上"，于是 dock **刚滑进来又缩回去**。
-		//   用户看到的现象就是"碰屏幕底边只闪一下、根本唤不出来"。
-		//   所以"光标停在停靠边的热区里"也要算成"贴着 dock"。
+		// ⚠ 热区是**另一个窗口**（贴边那条 1~20px 的细窗，见 EdgeHotZone.h），
+		//   而且压在最上层 —— 从热区唤出 dock 时，光标还压在热区上、并不在 dock 上。
+		//   "光标停在停靠边的热区里"必须算成"贴着 dock"。
+		// ⚠ 这条判定**两处都要用**（所以抽成 cursorOnHotZone）：
+		//   ① 这里 —— tickSlide 结尾问"该不该收"；
+		//   ② refreshHoverFromCursor() —— 鼠标事件里问"鼠标还在不在 dock 上"。
+		//   0.1.18 之前只有 ① 有，② 漏了。之前一直没暴露是因为热区 alpha=0 收不到
+		//   真实鼠标；alpha 修好、热区真能收到鼠标之后，② 的漏判立刻显形 ——
+		//   dock 升起约 500ms 又被 scheduleHide 收回（用户 2026-10-12 报的现象）。
+		return cursorOnHotZone(pt);
+	}
+
+	// ---------------------------------------------------------------------------
+	// 光标是否压在贴边热区上（判定口径见头文件里的长注释）。
+	// ---------------------------------------------------------------------------
+	bool DockWin::cursorOnHotZone(const POINT& pt) const
+	{
+		if (!cfgAutoHide || !hotZone.alive()) return false;
 		const RECT hz = hotZoneRect();
 		return PtInRect(&hz, pt) != 0;
 	}

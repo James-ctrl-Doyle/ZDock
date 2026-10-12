@@ -62,6 +62,14 @@ namespace zdock {
 		/// <summary>鼠标进入热区时回调（宿主据此滑入 dock）。</summary>
 		std::function<void()> onEnter;
 
+		/// <summary>
+		/// 鼠标离开热区时回调（宿主据此开始"离开后延迟收起"的计时）。
+		///
+		/// ⚠ 这一条不能省：光标**直接从热区移开**（不经过 dock 面板）时，dock 收不到
+		///   任何鼠标消息，没有这个回调就会一直"赖着展开"不收回。
+		/// </summary>
+		std::function<void()> onLeave;
+
 		/// <summary>日志回调（复用宿主的 Log）。</summary>
 		std::function<void(const std::wstring&)> onLog;
 
