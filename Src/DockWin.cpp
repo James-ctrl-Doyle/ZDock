@@ -199,8 +199,14 @@ namespace zdock {
 				// 这段时间里用户可能又移回来了（keepVisible 会 kill 掉这个定时器）。
 				killTimer(kTimerAutoHide);
 				hideDelayTimerOn = false;
-				if (menuSessions > 0 || hoverIndex >= 0) return;
-				if (refreshHoverFromCursor()) return;   // 光标还在上面
+				if (menuSessions > 0 || hoverIndex >= 0) {
+					log(std::format(L"[dock] 收起取消：menuSessions={} hoverIndex={}", menuSessions, hoverIndex));
+					return;
+				}
+				if (refreshHoverFromCursor()) {
+					log(L"[dock] 收起取消：光标还在 dock / 热区上");
+					return;
+				}
 				slideOut();
 				return;
 			}
@@ -220,13 +226,23 @@ namespace zdock {
 				return;
 			}
 			if (id != kTimerHover) return;
-			if (hoverIndex < 0) {
+			// ⚠⚠ 这里**不能只看 hoverIndex**（原逻辑：hoverIndex < 0 就关掉定时器）。
+			//   **从热区唤出的 dock** 的 hoverIndex 始终是 -1 —— 按旧逻辑，定时器一关，
+			//   这台 dock 就**完全没有"离开检测"**了，只能靠热区的 onLeave 一个信号，
+			//   那个信号一旦漏掉/来晚，dock 就永远赖着展开（用户 2026-10-13 报的
+			//   "鼠标移到屏幕中间很久，dock 还是不隐藏"）。
+			//   所以：**只要 dock 是展开态、且自动隐藏开着，就一直保持这个兜底检测**。
+			const bool needWatch = hoverIndex >= 0
+				|| (cfgAutoHide && slideState != SlideState::Hidden);
+			if (!needWatch) {
 				ensureHoverTimer(false);
 				return;
 			}
-			if (!refreshHoverFromCursor()) return;   // 鼠标还在，什么都不用做
-			// 已经缩回并且光标确实不在了：定时器可以停了
-			if (hoverIndex < 0) ensureHoverTimer(false);
+			// 这一句会按"光标到底在不在 dock / 热区上"决定 keepVisible() 还是 scheduleHide()
+			refreshHoverFromCursor();
+			if (!(cfgAutoHide && slideState != SlideState::Hidden) && hoverIndex < 0) {
+				ensureHoverTimer(false);
+			}
 			});
 
 		onMouseUp.add([this](POINT pt, bool right) {
@@ -505,8 +521,13 @@ namespace zdock {
 
 		hoverIndex = idx;
 		applyHover(idx);
-		// 鼠标确实在图标上 → 确保兜底定时器开着；移开了 → 交给调用方关
-		if (idx >= 0) ensureHoverTimer(true);
+		// ⚠⚠ 兜底定时器要在**两种情况**下都开着：
+		//   ① 鼠标在图标上（hoverIndex >= 0）—— 本来就有；
+		//   ② **dock 处于展开态且开了自动隐藏** —— 从**热区**唤出的场景下 hoverIndex
+		//      始终是 -1，只认 ① 的话就完全没有"离开检测"（见 kTimerHover 处理的注释）。
+		if (idx >= 0 || (cfgAutoHide && slideState != SlideState::Hidden)) {
+			ensureHoverTimer(true);
+		}
 		return true;
 	}
 
@@ -710,7 +731,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.24 · 修图标被裁切");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.25 · 修补自动隐藏漏检");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1788,6 +1809,7 @@ namespace zdock {
 			//   收不到任何鼠标消息 —— 没有它，dock 一旦被热区唤出就会一直赖着展开。
 			//   到期后 onTimer(kTimerAutoHide) 还会再确认一次（光标若在 dock 上则
 			//   refreshHoverFromCursor 会 keepVisible，不会误收）。
+			log(L"[hotzone] 鼠标离开热区");
 			scheduleHide();
 			};
 		hotZone.onLog = [](const std::wstring& s) { log(s); };
@@ -1976,12 +1998,21 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	void DockWin::scheduleHide()
 	{
+		// ⚠ 诊断日志：这条链一旦断掉，dock 就会"赖着不收起"。2026-10-13 用户报
+		//   "鼠标移到屏幕中间很久，dock 还是不隐藏" —— 靠这几条定位断在哪一环。
 		if (!cfgAutoHide) return;
-		if (menuSessions > 0) return;             // 菜单开着绝不隐藏
+		// ⚠ 已经收起就没什么可安排的 —— 不然兜底检测每 120ms 跑一次，
+		//   会变成"设定时器 → 到期 → slideOut 早退(已隐藏) → 又设"的空转。
+		if (slideState == SlideState::Hidden) return;
+		if (menuSessions > 0) {
+			log(std::format(L"[dock] scheduleHide 被跳过：菜单会话未结束（menuSessions={}）", menuSessions));
+			return;
+		}
 		if (shouldHideNow()) { slideOut(); return; }   // 全屏应用在前台：立刻让位
 		if (hideDelayTimerOn) return;
 		hideDelayTimerOn = true;
 		setTimer(cfgHideDelayMs, kTimerAutoHide);
+		log(std::format(L"[dock] scheduleHide：{}ms 后收起（menuSessions={}）", cfgHideDelayMs, menuSessions));
 	}
 
 	// ---------------------------------------------------------------------------
@@ -2131,6 +2162,10 @@ namespace zdock {
 			slideT = (slideTo > 0.f) ? 1.f : 0.f;
 			slideState = (slideTo > 0.f && std::abs(slideTo) > 1.f) ? SlideState::Hidden : SlideState::Shown;
 			log(std::format(L"[dock] 滑动结束 -> {}", slideState == SlideState::Hidden ? L"隐藏" : L"展开"));
+			// ⚠ 滑入完成后，若 dock 是展开态且开着自动隐藏，**必须**把兜底检测打开 ——
+			//   从**热区**唤出的路径下 hoverIndex 永远是 -1，没有这一步就没人去开它，
+			//   也就没人察觉"鼠标已经走了"（用户 2026-10-13 报的"很久不隐藏"）。
+			if (cfgAutoHide && slideState != SlideState::Hidden) ensureHoverTimer(true);
 			if (verboseSlide && s_frames > 0) {
 				const ULONGLONG total = nowTick - slideStartTick;
 				std::wstring seq;
