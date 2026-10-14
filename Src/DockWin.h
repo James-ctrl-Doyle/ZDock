@@ -276,7 +276,7 @@ namespace zdock {
 		void applyAutoHideConfig();
 
 		/// <summary>执行滑入（展开）。热区触发 / 鼠标回到面板上时调。</summary>
-		void slideIn();
+		void slideIn(const wchar_t* reason = nullptr);
 
 		/// <summary>执行滑出（隐藏）。延迟到期后调。</summary>
 		void slideOut();
@@ -288,7 +288,7 @@ namespace zdock {
 		/// 记一次"还在用 dock"（鼠标在面板上 / 菜单开着 / 悬停中）。
 		/// 会取消待执行的滑出。
 		/// </summary>
-		void keepVisible();
+		void keepVisible(const wchar_t* reason = nullptr);
 
 		/// <summary>鼠标离开面板时调：启动 500ms 延迟滑出。</summary>
 		void scheduleHide();

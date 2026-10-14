@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 0.1.29 · 修「切换应用时 dock 被无声唤出」— 2026-10-14
+
+用户三报（0.1.23 / 0.1.26 / 0.1.28 都没修对）：聚焦 WorkBuddy → 点一下文件管理器窗口
+→ 隐藏的 dock 弹出来、又马上收起。
+
+### 根因：`onMouseMove` 处理器不看坐标，把"鼠标离开"当成了"鼠标移入"
+
+Ling 有两条路径会派发 `onMouseMove`，**都不代表用户正在用 dock**：
+
+1. `WinBase::mouseLeave()` 派发的是**哨兵坐标** `POINT{INT_MAX, INT_MAX}`
+   （语义恰好相反 = "鼠标不在窗口里"）；
+2. `WinBase::paint() → layout()` 结尾的 `refreshHover()` 会**重播** `lastMousePos`
+   （布局/重绘后补一次 hover 重算，系统不会再发 WM_MOUSEMOVE）。
+
+而 ZDock 的处理器是 `onMouseMove.add([this](POINT){ keepVisible(); });` —— 完全不看
+坐标，于是每次重排/重绘都会把**隐藏的 dock 唤出来**，光标根本不在 dock 上，200ms 后
+又被 `scheduleHide` 收回去 = "弹出又马上隐藏"。
+
+触发面比想象的大，完整链路：
+
+```
+切换应用 → tracker.onChanged → syncWithTracker → refreshIndicators()（无条件调用）
+→ placeIndicators() → IndicatorNode::setPosition → Node::setPosition → win->refresh()
+→ WM_PAINT → WinBase::paint() → layout() → refreshHover() → onMouseMove(哨兵)
+→ keepVisible() → slideIn()   ← 隐藏的 dock 被无声唤出
+```
+
+实证（`_verify_relayoutwake.py`）：光标在 (1761,464)、距 dock 一千像素，
+日志 `滑入开始（184px / 150ms）[来源=dock鼠标移动 光标=1761,464]`。
+
+前三版都在修"窗口位置摆得对不对"（0.1.23 矫枉过正、0.1.26 两次 SetWindowPos、
+0.1.28 滑动中被杀），**从没修触发源** —— 所以一直没解决。
+
+### 修法
+
+`onMouseMove` 处理器加坐标校检：拒绝 INT_MAX 哨兵；用 `cursorOverDock()`（按光标
+**真实位置**问 `WindowFromPoint`）复核，重播的旧坐标过不了这一关。
+
+### 验证（先复现、再对比）
+
+| 判据 | 修前 | 修后 |
+|---|---|---|
+| 分组变化期间 dock 位置变化 | **1440→1256 弹出又收回** | **0 次** |
+| 日志 | `滑入开始[来源=dock鼠标移动 光标=1761,464]` | 无滑入 |
+| 真实鼠标唤醒/离开 | — | 8/8 PASS（无回归） |
+| 滑入打断 / 隐藏稳定 / 滑动帧率 | — | 3/3、4/4、4/4 PASS |
+
 ## 0.1.28 · 修「莫名上浮」：滑入动画被分组变化杀死 — 2026-10-14
 
 用户报：dock 会"莫名上浮"（切换应用 / 开窗口时，dock 直接出现在屏幕上，没有动画）。

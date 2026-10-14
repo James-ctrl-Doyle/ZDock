@@ -15,6 +15,22 @@
 
 namespace zdock {
 
+	// ---------------------------------------------------------------------------
+	// 诊断用：当前前台窗口的标题（无标题窗口退化为类名）。
+	// "莫名滑入"定位用 —— 滑入时把它和光标坐标一起打进日志，一眼看出是谁触发的。
+	// ---------------------------------------------------------------------------
+	std::wstring foregroundTitle()
+	{
+		HWND fg = GetForegroundWindow();
+		if (!fg) return L"(无)";
+		wchar_t t[256]{};
+		GetWindowTextW(fg, t, 256);
+		if (t[0]) return t;
+		wchar_t c[128]{};
+		GetClassNameW(fg, c, 128);
+		return std::wstring(L"<") + c + L">";
+	}
+
 	// 子类化回调里取 this 用（单实例程序，静态指针够用）。
 	// ⚠ 不读 GWLP_USERDATA —— 那里是 Ling 自己的 WinBase*。
 	DockWin* DockWin::s_self = nullptr;
@@ -271,7 +287,31 @@ namespace zdock {
 			});
 
 		// 鼠标在面板上动 → 说明用户在用它，取消待执行的滑出（并滑入，如果还是隐藏态）。
-		onMouseMove.add([this](POINT) { keepVisible(); });
+		//
+		// ⚠⚠ 必须校检坐标，不能无条件 keepVisible —— Ling 有两条路径会派发
+		//   onMouseMove，而它们都不代表"用户正在用 dock"：
+		//    ① `WinBase::mouseLeave()` 派发的是**哨兵坐标** `POINT{INT_MAX,INT_MAX}`
+		//       （语义恰好相反 = "鼠标不在窗口里"）；
+		//    ② `WinBase::paint() → layout()` 结尾的 `refreshHover()` 会**重播**
+		//       `lastMousePos`（布局/重绘后补一次 hover 重算，系统不会再发 WM_MOUSEMOVE）。
+		//   旧代码 `onMouseMove.add([this](POINT){ keepVisible(); })` 完全不看坐标 ——
+		//   于是每次重排/重绘都会把**隐藏的 dock 唤出来**，而光标根本不在 dock 上，
+		//   200ms 后又被 scheduleHide 收回去 = 用户看到的"莫名上浮 / 弹出又马上隐藏"。
+		//   ⚠ 触发面比想象的大：切换应用 → tracker.onChanged → syncWithTracker →
+		//      refreshIndicators()（**无条件**调用）→ placeIndicators() →
+		//      IndicatorNode::setPosition → Node::setPosition → win->refresh()
+		//      → WM_PAINT → layout() → refreshHover() → 走到这里。
+		//      实证：_verify_relayoutwake.py（光标在 (1761,464)、距 dock 一千像素，
+		//      日志 `滑入开始[来源=dock鼠标移动]`）。用户 2026-10-12/13/14 三报的
+		//      "切换应用时 dock 上浮"根因就是这条 —— 前三版都在修"位置摆得对不对"，
+		//      从没修触发源。
+		//   判据用 cursorOverDock()：按光标**真实位置**问 WindowFromPoint，
+		//   哨兵与重播的旧坐标都过不了这一关。
+		onMouseMove.add([this](POINT pt) {
+			if (pt.x == INT_MAX && pt.y == INT_MAX) return;   // Ling 的"鼠标已离开"哨兵
+			if (!cursorOverDock()) return;   // 真实光标不在 dock/热区上 → 忽略（重播的旧坐标）
+			keepVisible(L"dock鼠标移动");
+			});
 
 		// DPI 变化（改系统缩放比、跨不同 DPI 的显示器）→ 重排。
 		// ⚠ 两件事都在这里发生，缺一不可：
@@ -314,7 +354,7 @@ namespace zdock {
 		settings.onLiveChanged = [this] {
 			applyLiveConfig();
 			// 设置窗口开着的时候别把 dock 收走 —— 用户正盯着它看改动的效果
-			if (settings.isOpen()) keepVisible();
+			if (settings.isOpen()) keepVisible(L"设置开着");
 			};
 
 		// 开机自启：以配置为准同步一次注册表。
@@ -513,7 +553,7 @@ namespace zdock {
 		//   不是轮询：我们只是借"系统刚好在问命中"这个时机顺便看了一眼光标。
 		//   任务书红线 4 的例外条款明确允许"自动隐藏延迟这类自身 UI 状态"。 
 		if (cfgAutoHide && slideState != SlideState::Hidden) {
-			if (overDock || overHotZone || menuSessions > 0) keepVisible();
+			if (overDock || overHotZone || menuSessions > 0) keepVisible(L"hover刷新");
 			else scheduleHide();
 		}
 
@@ -731,7 +771,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.28 · 修滑入被重排杀死");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.29 · 修切换应用时 dock 被无声唤出");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1791,7 +1831,7 @@ namespace zdock {
 	{
 		settings.open();
 		// 设置窗口开着的时候 dock 必须留在屏幕上 —— 用户要一边改一边看效果
-		keepVisible();
+		keepVisible(L"打开设置");
 	}
 
 	void DockWin::relayoutForEnvironment()
@@ -1822,8 +1862,8 @@ namespace zdock {
 	{
 		hotZone.onEnter = [this] {
 			// 热区被碰到 → 立刻滑入（并取消任何待执行的滑出）
-			keepVisible();
-			slideIn();
+			keepVisible(L"热区onEnter");
+			slideIn(L"热区onEnter");
 			};
 		hotZone.onLeave = [this] {
 			// 鼠标离开热区 → 开始"离开后延迟收起"的计时。
@@ -2005,13 +2045,13 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	// 记一次"用户还在用 dock"：取消待执行的滑出 + 若已隐藏则滑入。
 	// ---------------------------------------------------------------------------
-	void DockWin::keepVisible()
+	void DockWin::keepVisible(const wchar_t* reason)
 	{
 		if (hideDelayTimerOn) {
 			killTimer(kTimerAutoHide);
 			hideDelayTimerOn = false;
 		}
-		if (slideState != SlideState::Shown && !shouldHideNow()) slideIn();
+		if (slideState != SlideState::Shown && !shouldHideNow()) slideIn(reason);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -2040,7 +2080,7 @@ namespace zdock {
 	// ---------------------------------------------------------------------------
 	// 滑入（展开）。时长 cfgSlideInMs（默认 200ms）。
 	// ---------------------------------------------------------------------------
-	void DockWin::slideIn()
+	void DockWin::slideIn(const wchar_t* reason)
 	{
 		// ⚠ 不检查 cfgAutoHide：滑动是**动作**，由调用方决定要不要调
 		//   （自动隐藏、全屏让位退出都会用），配置门控在各调用点。
@@ -2074,7 +2114,13 @@ namespace zdock {
 			slideTimerOn = true;
 			setTimer(kSlideTimerMs, kTimerSlide);
 		}
-		log(std::format(L"[dock] 滑入开始（{:.0f}px / {}ms）", slideFrom, slideDurMs));
+		// ⚠ 诊断（0.1.29）："莫名上浮"三次没修对，因为不知道滑入是谁触发的。
+		//   这里把**来源 + 光标坐标 + 前台窗口**一起打出来 —— 复现一次就能定位。
+		POINT dbgPt{};
+		GetCursorPos(&dbgPt);
+		log(std::format(L"[dock] 滑入开始（{:.0f}px / {}ms）[来源={} 光标={},{} 前台=\"{}\"",
+			slideFrom, slideDurMs, reason ? reason : L"?", dbgPt.x, dbgPt.y,
+			foregroundTitle()));
 	}
 
 	// ---------------------------------------------------------------------------
@@ -2291,7 +2337,7 @@ namespace zdock {
 		else {
 			// 全屏退出：把 dock 放回来。但**不抢鼠标**——如果用户鼠标不在
 			// dock 上，滑入结束后 tickSlide 会补一次 scheduleHide 把它收回去。
-			slideIn();
+			slideIn(L"全屏退出");
 		}
 	}
 
@@ -2520,7 +2566,7 @@ namespace zdock {
 
 		DragFinish(drop);
 		// 拖放刚结束，鼠标多半还在 dock 上 —— 别立刻把它收走
-		keepVisible();
+		keepVisible(L"拖放结束");
 	}
 
 	LRESULT DockWin::onHitTest(const POINT pos)
