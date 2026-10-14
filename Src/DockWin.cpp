@@ -731,7 +731,7 @@ namespace zdock {
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		AppendMenuW(menu, MF_STRING, kMenuExit, L"退出 ZDock");
 		AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.27 · 高精度驱动 120fps");
+		AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"ZDock 0.1.28 · 修滑入被重排杀死");
 
 		POINT pt{};
 		GetCursorPos(&pt);
@@ -1261,25 +1261,41 @@ namespace zdock {
 		//     用户看到的就是"弹一下又缩回去"。而窗口位置这种几何状态**没有中间态可接受**。
 		//
 		//   所以：**先按当前滑动状态算出该在哪，然后一次摆到位**。
-		const bool wantHidden = (slideState == SlideState::Hidden
-			|| (slideState == SlideState::Sliding && slideTo > 0.f));
-		if (wantHidden) {
-			// 隐藏态（或正在往隐藏走）：落位到隐藏终点，避免半路跳变
+		//
+		// ⚠⚠ 但"一次摆到位"只适用于**两个终态**（Hidden / Shown）。
+		//   滑动中（Sliding）**绝不许落位到终点** —— 0.1.27 在这里栽过：
+		//   那时"正在滑入"也被 killTimer + 落位到展开终点，本意是修"切换应用时
+		//   dock 上浮"，结果矫枉过正 —— 滑入才走 3ms（150ms 的动画）就被分组变化
+		//   杀掉，dock **瞬间整个蹦出来**。用户 2026-10-14 报的"莫名上浮"就是这个，
+		//   日志实证：
+		//     19:06:10.811 [dock] 滑入开始（184px / 150ms）
+		//     19:06:10.814 [dock] 分组变化 → 已重排布局      ← 3ms 后就杀了
+		//     （此后再没有"滑动结束 -> 展开"，dock 直接停在展开位 47 秒）
+		//   滑出方向同理：被打断就是"瞬间消失"。两者都不该有。
+		if (slideState == SlideState::Sliding) {
+			// 正在滑入 / 滑出：**让动画继续走完**。
+			//
+			//   重排可能改了窗口尺寸（临时图标增删 → 窗口高变），滑动基准得跟着更新：
+			//     ① 用**旧**基准量出当前偏移，按"新展开位 + 当前偏移"原位重摆一次
+			//        （applyDockPlacement 会顺带把 shownOrigin 更新成新尺寸算的值，
+			//         tickSlide 每帧都用它摆位，所以必须在这里刷新）；
+			//     ② slideFrom ← 当前偏移；滑出时 slideTo ← 新的 slideDistance()；
+			//     ③ **slideStartTick 不动** —— 时间线连续，动画接着走完、位置无跳变。
+			const float off = static_cast<float>(curSlideOffset());
+			applyDockPlacement(static_cast<int>(off));
+			slideFrom = off;
+			if (slideTo > 0.f) slideTo = static_cast<float>(slideDistance());
+		}
+		else if (slideState == SlideState::Hidden) {
+			// 已隐藏：落隐藏终点（按新尺寸算的隐藏位）
 			killTimer(kTimerSlide);
 			slideTimerOn = false;
 			setAnimTick(false);
-			slideState = SlideState::Hidden;
 			slideT = 1.f;
 			applyDockPlacementHidden();
 		}
 		else {
-			// 展开态 / 正在滑入：落位到展开位
-			if (slideState == SlideState::Sliding) {
-				killTimer(kTimerSlide);
-				slideTimerOn = false;
-				slideState = SlideState::Shown;
-				slideT = 0.f;
-			}
+			// 展开态：落展开位
 			applyDockPlacement(0);
 		}
 
